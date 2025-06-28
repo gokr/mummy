@@ -6,11 +6,11 @@ proc handler(request: Request) =
 block:
   var router: Router
   router.notFoundHandler = proc(request: Request) =
-    echo "Not found: ", request.path
+    doAssert false
   router.methodNotAllowedHandler = proc(request: Request) =
-    echo "Method not allowed: ", request.httpMethod, " ", request.path
+    doAssert false
   router.errorHandler = proc(request: Request, e: ref Exception) =
-    echo "Error: ", e.msg
+    doAssert false
 
   router.get("/", handler)
   router.get("/page.html", handler)
@@ -45,16 +45,19 @@ block:
   request.httpMethod = "GET"
 
   request.path = ""
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "page.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/"
   routerHandler(request)
 
   request.path = "/a"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/page.html"
   routerHandler(request)
@@ -66,19 +69,23 @@ block:
   routerHandler(request)
 
   request.path = "/script.j"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/script.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/script"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/min.js"
   routerHandler(request)
 
   request.path = "/index.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/index.html"
   routerHandler(request)
@@ -87,25 +94,30 @@ block:
   routerHandler(request)
 
   request.path = "/a/b/index.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/styles/index.css"
   routerHandler(request)
 
   request.path = "/styles/2/index.css"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/styles/script.js"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/partial"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/partial/something"
   routerHandler(request)
 
   request.path = "/partial/more/here"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/literal*"
   routerHandler(request)
@@ -132,7 +144,8 @@ block:
   routerHandler(request)
 
   request.path = "/doubl"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   block:
     let url = parseUrl("/%E8%B3%AA%E5%95%8F/%E6%97%A5%E6%9C%AC%E8%AA%9E%E3%81%AEURL%E3%81%AF%E3%81%A9%E3%81%86%E3%81%99%E3%82%8B")
@@ -193,13 +206,16 @@ block:
   request.httpMethod = "GET"
 
   request.path = "/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/TEST/page.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/TEST/a/b/c/d.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/TEST/b.html"
   routerHandler(request)
@@ -221,25 +237,32 @@ block:
   request.httpMethod = "GET"
 
   request.path = "/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/index.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/path"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/path/to/thing.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/b/c/d/e/f/g/h.txt"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/b/TEST/d/f/g.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/TEST/page.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/b/TEST/d/f/g/TEST2/page.html"
   routerHandler(request)
@@ -248,19 +271,24 @@ block:
   routerHandler(request)
 
   request.path = "/TEST/page.html&3"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/TEST/TEST2/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/TEST/TEST2/page.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/TEST/TEST2/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a/TEST/TEST2/page.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
 block:
   var router: Router
@@ -279,7 +307,8 @@ block:
   request.httpMethod = "GET"
 
   request.path = "/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/page/thing/do.html"
   routerHandler(request)
@@ -288,10 +317,12 @@ block:
   routerHandler(request)
 
   request.path = "/wowpage/do.html"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/wowpage/a/do.htm"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
 block:
   var router: Router
@@ -319,10 +350,12 @@ block:
   routerHandler(request)
 
   request.path = "/a/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/something"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
 block:
   var router: Router
@@ -353,10 +386,12 @@ block:
   routerHandler(request)
 
   request.path = "/something/"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/something/else"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
 block:
   var router: Router
@@ -375,13 +410,16 @@ block:
   request.httpMethod = "GET"
 
   request.path = "/a"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/ab"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/asomethingb"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a*b"
   routerHandler(request)
@@ -404,13 +442,16 @@ block:
   request.httpMethod = "GET"
 
   request.path = "/a"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/ab"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/asomethingb"
-  # Expected to trigger notFoundHandler:
+  doAssertRaises AssertionDefect:
+    routerHandler(request)
 
   request.path = "/a**b"
   routerHandler(request)
