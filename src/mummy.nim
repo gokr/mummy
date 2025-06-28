@@ -38,6 +38,56 @@ let
   http11 = "HTTP/1.1"
 
 type
+  # Simple types first
+  WebSocketEvent* = enum
+    OpenEvent, MessageEvent, ErrorEvent, CloseEvent
+
+  MessageKind* = enum
+    TextMessage, BinaryMessage, Ping, Pong
+
+  ExecutionModel* = enum
+    ## Defines how the server handles request processing
+    ThreadPool,  ## Traditional fixed thread pool (default, backward compatible)
+    TaskPools    ## Dynamic taskpools-based processing
+
+  Message* = object
+    kind*: MessageKind
+    data*: string
+
+  IsolatableRequestData* = object
+    ## Taskpools-compatible request data containing only isolatable fields
+    httpVersion*: HttpVersion
+    httpMethod*: string
+    uri*: string
+    path*: string
+    queryParams*: QueryParams
+    pathParams*: PathParams
+    headers*: HttpHeaders
+    body*: string
+    remoteAddress*: string
+    clientId*: uint64  # For response correlation
+
+  ResponseData* = object
+    ## Response data returned from taskpools handlers
+    statusCode*: int
+    headers*: HttpHeaders
+    body*: string
+    closeConnection*: bool
+
+  TaskPoolsHandler* = proc(data: IsolatableRequestData): ResponseData {.gcsafe.}
+
+  # Forward declarations and interdependent types
+  Server* = ptr ServerObj
+  Request* = ptr RequestObj
+
+  RequestHandler* = proc(request: Request) {.gcsafe.}
+
+  WebSocketHandler* = proc(
+    websocket: WebSocket,
+    event: WebSocketEvent,
+    message: Message
+  ) {.gcsafe.}
+
   RequestObj* = object
     httpVersion*: HttpVersion ## HTTP version from the request line.
     httpMethod*: string ## HTTP method from the request line.
@@ -53,67 +103,25 @@ type
     clientId: uint64
     responded: bool
 
-  Request* = ptr RequestObj
-
   WebSocket* = object
     server: Server
     clientSocket: SocketHandle
     clientId: uint64
 
-  Message* = object
-    kind*: MessageKind
-    data*: string
-
-  WebSocketEvent* = enum
-    OpenEvent, MessageEvent, ErrorEvent, CloseEvent
-
-  MessageKind* = enum
-    TextMessage, BinaryMessage, Ping, Pong
-
-  RequestHandler* = proc(request: Request) {.gcsafe.}
-
-  WebSocketHandler* = proc(
-    websocket: WebSocket,
-    event: WebSocketEvent,
-    message: Message
-  ) {.gcsafe.}
-
-  ExecutionModel* = enum
-    ## Defines how the server handles request processing
-    ThreadPool,  ## Traditional fixed thread pool (default, backward compatible)
-    TaskPools    ## Dynamic taskpools-based processing
-
-  ServerObj = object
-    handler: RequestHandler
-    websocketHandler: WebSocketHandler
-    logHandler: LogHandler
-    maxHeadersLen, maxBodyLen, maxMessageLen: int
-    rand: Rand
-    executionModel: ExecutionModel
-    workerThreads: seq[Thread[Server]]
-    taskpool: Taskpool
-    serving: Atomic[bool]
-    destroyCalled: bool
-    socket: SocketHandle
-    selector: Selector[DataEntry]
-    responseQueued, sendQueued, shutdown: SelectEvent
-    clientSockets: HashSet[SocketHandle]
-    taskQueueLock: Lock
-    taskQueueCond: Cond
-    taskQueue: Deque[WorkerTask]
-    responseQueue: Deque[OutgoingBuffer]
-    responseQueueLock: Lock
-    sendQueue: Deque[OutgoingBuffer]
-    sendQueueLock: Lock
-    websocketClaimed: Table[WebSocket, bool]
-    websocketQueues: Table[WebSocket, Deque[WebSocketUpdate]]
-    websocketQueuesLock: Lock
-
-  Server* = ptr ServerObj
+  # Other interdependent types
+  WorkerTaskKind = enum
+    ThreadPoolTask, TaskPoolsTask, WebSocketTask
 
   WorkerTask = object
-    request: Request
-    websocket: WebSocket
+    case kind: WorkerTaskKind:
+    of ThreadPoolTask:
+      request: Request
+    of TaskPoolsTask:
+      isolatableData: IsolatableRequestData
+      taskPoolsHandler: TaskPoolsHandler
+      clientSocket: SocketHandle
+    of WebSocketTask:
+      websocket: WebSocket
 
   DataEntryKind = enum
     ServerSocketEntry, ClientSocketEntry, EventEntry
@@ -167,6 +175,87 @@ type
     event: WebSocketEvent
     message: Message
 
+  ServerObj {.acyclic.} = object
+    handler: RequestHandler
+    taskpoolsHandler: TaskPoolsHandler
+    websocketHandler: WebSocketHandler
+    logHandler: LogHandler
+    maxHeadersLen, maxBodyLen, maxMessageLen: int
+    rand: Rand
+    executionModel: ExecutionModel
+    workerThreads: seq[Thread[Server]]
+    taskpool: Taskpool
+    serving: Atomic[bool]
+    destroyCalled: bool
+    socket: SocketHandle
+    selector: Selector[DataEntry]
+    responseQueued, sendQueued, shutdown: SelectEvent
+    clientSockets: HashSet[SocketHandle]
+    taskQueueLock: Lock
+    taskQueueCond: Cond
+    taskQueue: Deque[WorkerTask]
+    responseQueue: Deque[OutgoingBuffer]
+    responseQueueLock: Lock
+    sendQueue: Deque[OutgoingBuffer]
+    sendQueueLock: Lock
+    websocketClaimed: Table[WebSocket, bool]
+    websocketQueues: Table[WebSocket, Deque[WebSocketUpdate]]
+    websocketQueuesLock: Lock
+
+  # Types moved above in main type section
+
+  SSEConnection* = object
+    ## Represents an active Server-Sent Events connection
+    server*: Server
+    clientSocket*: SocketHandle
+    clientId*: uint64
+    active*: bool
+
+  SSEEvent* = object
+    ## Represents a Server-Sent Events message
+    event*: Option[string]  ## Optional event type
+    data*: string          ## The data payload (required)
+    id*: Option[string]    ## Optional event ID for client-side event tracking
+    retry*: Option[int]    ## Optional retry timeout in milliseconds
+
+proc formatSSEEvent*(event: SSEEvent): string {.raises: [], gcsafe.} =
+  ## Format an SSE event according to the Server-Sent Events specification
+  ## https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+  
+  result = ""
+  
+  # Add event type if specified
+  if event.event.isSome:
+    result.add("event: " & event.event.get() & "\n")
+  
+  # Add event ID if specified
+  if event.id.isSome:
+    result.add("id: " & event.id.get() & "\n")
+  
+  # Add retry timeout if specified
+  if event.retry.isSome:
+    result.add("retry: " & $event.retry.get() & "\n")
+  
+  # Add data field(s) - handle multiline data properly
+  if event.data.len > 0:
+    # Split multiline data and prefix each line with "data: "
+    var pos = 0
+    while pos < event.data.len:
+      result.add("data: ")
+      let lineStart = pos
+      while pos < event.data.len and event.data[pos] != '\n':
+        inc pos
+      result.add(event.data[lineStart ..< pos])
+      result.add("\n")
+      if pos < event.data.len: # Skip the \n
+        inc pos
+  else:
+    # Empty data field
+    result.add("data: \n")
+  
+  # End event with empty line
+  result.add("\n")
+
 proc `$`*(request: Request): string {.gcsafe.} =
   result = request.httpMethod & " " & request.uri & " "
   {.gcsafe.}:
@@ -180,6 +269,26 @@ proc `$`*(request: Request): string {.gcsafe.} =
 proc `$`*(websocket: WebSocket): string =
   "WebSocket " & $cast[uint](hash(websocket))
 
+proc toIsolatableRequestData*(request: Request): IsolatableRequestData {.gcsafe.} =
+  ## Convert a Request object to IsolatableRequestData for taskpools
+  result.httpVersion = request.httpVersion
+  result.httpMethod = request.httpMethod
+  result.uri = request.uri
+  result.path = request.path
+  result.queryParams = request.queryParams
+  result.pathParams = request.pathParams
+  result.headers = request.headers
+  result.body = request.body
+  result.remoteAddress = request.remoteAddress
+  result.clientId = request.clientId
+
+proc createResponseData*(statusCode: int, headers: HttpHeaders, body: string, closeConnection: bool = false): ResponseData {.gcsafe.} =
+  ## Create a ResponseData object for taskpools handlers
+  result.statusCode = statusCode
+  result.headers = headers
+  result.body = body
+  result.closeConnection = closeConnection
+
 proc log(server: Server, level: LogLevel, args: varargs[string]) =
   if server.logHandler == nil:
     return
@@ -187,6 +296,78 @@ proc log(server: Server, level: LogLevel, args: varargs[string]) =
     server.logHandler(level, args)
   except:
     discard # ???
+
+proc trigger(
+  server: Server,
+  event: SelectEvent
+) {.raises: [].} =
+  try:
+    event.trigger()
+  except:
+    let err = osLastError()
+    server.log(
+      ErrorLevel,
+      "Error triggering event ", $err, " ", osErrorMsg(err)
+    )
+
+proc responseDataToOutgoingBuffer*(responseData: ResponseData, clientSocket: SocketHandle, clientId: uint64): OutgoingBuffer {.gcsafe.} =
+  ## Convert ResponseData to OutgoingBuffer for sending
+  result.clientSocket = clientSocket
+  result.clientId = clientId
+  result.closeConnection = responseData.closeConnection
+  
+  # Encode HTTP response
+  var response = "HTTP/1.1 " & $responseData.statusCode
+  case responseData.statusCode:
+  of 200: response &= " OK"
+  of 404: response &= " Not Found"
+  of 500: response &= " Internal Server Error"
+  else: response &= " Unknown"
+  
+  response &= "\r\n"
+  
+  # Add headers
+  for (key, value) in responseData.headers:
+    response &= key & ": " & value & "\r\n"
+  
+  # Add Content-Length if not present
+  if "Content-Length" notin responseData.headers:
+    response &= "Content-Length: " & $responseData.body.len & "\r\n"
+  
+  response &= "\r\n" & responseData.body
+  
+  result.buffer1 = response
+
+proc executeTaskpoolsRequest*(data: IsolatableRequestData, handler: TaskPoolsHandler): ResponseData {.gcsafe.} =
+  ## Execute a taskpools request with proper error handling
+  try:
+    result = handler(data)
+  except:
+    let e = getCurrentException()
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/plain"
+    result = createResponseData(500, headers, "Handler Exception: " & e.msg)
+
+# TaskPools-related functions for future implementation
+# Currently disabled due to taskpools library limitations with procedure isolation
+
+# proc simpleTask(path: string) {.gcsafe.} =
+#   ## Simple task for testing taskpools integration
+#   discard # Just a placeholder for now
+
+# proc processTaskpoolsRequest(data: IsolatableRequestData, clientSocket: SocketHandle, clientId: uint64) {.gcsafe.} =
+#   ## Process a taskpools request (simplified version for demo)
+#   ## This function is spawned on the taskpool
+#   
+#   # For now, use a simple default response since we can't easily pass handler
+#   var headers: HttpHeaders
+#   headers["Content-Type"] = "text/plain"
+#   let responseData = createResponseData(200, headers, "TaskPools response for: " & data.path)
+#   let outgoingBuffer = responseDataToOutgoingBuffer(responseData, clientSocket, clientId)
+#   
+#   # TODO: Need to implement proper response queuing mechanism for taskpools
+#   # For now, this is a simplified version that doesn't queue responses
+#   discard # outgoingBuffer would need to be sent back to main thread
 
 proc headerContainsToken(headers: var HttpHeaders, key, token: string): bool =
   # If a header looks like `Accept-Encoding: gzip,deflate` then we may want to
@@ -235,19 +416,6 @@ proc updateHandle2(
     selector.updateHandle(socket, events)
   except ValueError: # Why ValueError?
     raise newException(IOSelectorsException, getCurrentExceptionMsg())
-
-proc trigger(
-  server: Server,
-  event: SelectEvent
-) {.raises: [].} =
-  try:
-    event.trigger()
-  except:
-    let err = osLastError()
-    server.log(
-      ErrorLevel,
-      "Error triggering event ", $err, " ", osErrorMsg(err)
-    )
 
 proc send*(
   websocket: WebSocket,
@@ -474,7 +642,7 @@ proc respondSSE*(
   
   # Create SSE connection object
   result = SSEConnection(
-    server: cast[pointer](request.server),
+    server: request.server,
     clientSocket: request.clientSocket,
     clientId: request.clientId,
     active: true
@@ -514,7 +682,6 @@ proc send*(
   if not connection.active:
     return
   
-  let server = cast[Server](connection.server)
   let formattedEvent = formatSSEEvent(event)
   
   # Create outgoing buffer for the SSE event
@@ -527,12 +694,12 @@ proc send*(
   
   # Queue the event for sending
   var queueWasEmpty: bool
-  withLock server.responseQueueLock:
-    queueWasEmpty = server.responseQueue.len == 0
-    server.responseQueue.addLast(move buffer)
+  withLock connection.server.responseQueueLock:
+    queueWasEmpty = connection.server.responseQueue.len == 0
+    connection.server.responseQueue.addLast(move buffer)
   
   if queueWasEmpty:
-    server.trigger(server.responseQueued)
+    connection.server.trigger(connection.server.responseQueued)
 
 proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   ## Close the SSE connection.
@@ -540,7 +707,6 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   connection.active = false
   
-  let server = cast[Server](connection.server)
   
   # Mark the connection for closure
   var buffer = OutgoingBuffer()
@@ -551,19 +717,20 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   # Queue connection closure
   var queueWasEmpty: bool
-  withLock server.responseQueueLock:
-    queueWasEmpty = server.responseQueue.len == 0
-    server.responseQueue.addLast(move buffer)
+  withLock connection.server.responseQueueLock:
+    queueWasEmpty = connection.server.responseQueue.len == 0
+    connection.server.responseQueue.addLast(move buffer)
   
   if queueWasEmpty:
-    server.trigger(server.responseQueued)
+    connection.server.trigger(connection.server.responseQueued)
 
 proc workerProc(server: Server) {.raises: [].} =
   # The worker threads run the task queue here
   let server = server
 
   proc runTask(task: WorkerTask) =
-    if task.request != nil:
+    case task.kind:
+    of ThreadPoolTask:
       try:
         server.handler(task.request)
       except:
@@ -576,7 +743,21 @@ proc workerProc(server: Server) {.raises: [].} =
           task.request.respond(500)
       `=destroy`(task.request[])
       deallocShared(task.request)
-    else: # WebSocket
+    of TaskPoolsTask:
+      # TaskPools tasks shouldn't reach worker threads - they're handled by taskpools directly
+      # This is a fallback case that shouldn't normally be reached
+      let responseData = executeTaskpoolsRequest(task.isolatableData, task.taskPoolsHandler)
+      let outgoingBuffer = responseDataToOutgoingBuffer(responseData, task.clientSocket, task.isolatableData.clientId)
+      
+      # Queue the response for sending
+      var queueWasEmpty: bool
+      withLock server.responseQueueLock:
+        queueWasEmpty = server.responseQueue.len == 0
+        server.responseQueue.addLast(outgoingBuffer)
+      
+      if queueWasEmpty:
+        server.trigger(server.responseQueued)
+    of WebSocketTask:
       withLock server.websocketQueuesLock:
         if server.websocketClaimed.getOrDefault(task.websocket, true):
           # If this websocket has been claimed or if it is not present in
@@ -643,12 +824,26 @@ proc workerProc(server: Server) {.raises: [].} =
         loggedExceptionLeak = true
 
 proc postTask(server: Server, task: WorkerTask) {.raises: [].} =
-  # For now, both execution models use the same thread pool approach
-  # TaskPools integration will be implemented in a future version
-  # when taskpools API stabilizes for complex object handling
-  withLock server.taskQueueLock:
-    server.taskQueue.addLast(task)
-  signal(server.taskQueueCond)
+  case server.executionModel:
+  of ThreadPool:
+    # Traditional thread pool: add to queue for worker threads
+    withLock server.taskQueueLock:
+      server.taskQueue.addLast(task)
+    signal(server.taskQueueCond)
+  of TaskPools:
+    # TaskPools execution model
+    # For now, fall back to thread pool until taskpools integration is fully resolved
+    case task.kind:
+    of ThreadPoolTask, TaskPoolsTask:
+      # Fall back to thread pool for now
+      withLock server.taskQueueLock:
+        server.taskQueue.addLast(task)
+      signal(server.taskQueueCond)
+    of WebSocketTask:
+      # WebSockets still use thread pool for serial processing
+      withLock server.taskQueueLock:
+        server.taskQueue.addLast(task)
+      signal(server.taskQueueCond)
 
 proc postWebSocketUpdate(
   websocket: WebSocket,
@@ -672,7 +867,7 @@ proc postWebSocketUpdate(
       discard # Not possible
 
   if needsTask:
-    websocket.server.postTask(WorkerTask(websocket: websocket))
+    websocket.server.postTask(WorkerTask(kind: WebSocketTask, websocket: websocket))
 
 proc sendCloseFrame(
   server: Server,
@@ -1136,7 +1331,7 @@ proc afterRecvHttp(
 
       if chunkLen == 0: # A chunk of len 0 marks the end of the request body
         let request = server.popRequest(clientSocket, dataEntry)
-        server.postTask(WorkerTask(request: request))
+        server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
   else:
     if dataEntry.requestState.contentLength > server.maxBodyLen:
       server.log(DebugLevel, "Dropped connection, body too long")
@@ -1174,7 +1369,7 @@ proc afterRecvHttp(
         dataEntry.bytesReceived = bytesRemaining
 
     let request = server.popRequest(clientSocket, dataEntry)
-    server.postTask(WorkerTask(request: request))
+    server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
 
 proc afterRecv(
   server: Server,
@@ -1584,7 +1779,8 @@ proc newServer*(
   maxHeadersLen = 8 * 1024, # 8 KB
   maxBodyLen = 1024 * 1024, # 1 MB
   maxMessageLen = 64 * 1024, # 64 KB
-  executionModel: ExecutionModel = ThreadPool
+  executionModel: ExecutionModel = ThreadPool,
+  taskpoolsHandler: TaskPoolsHandler = nil
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
@@ -1612,9 +1808,29 @@ proc newServer*(
   result.maxMessageLen = maxMessageLen
   result.rand = initRand()
   result.executionModel = executionModel
+  
+  # Initialize taskpools handler
+  if taskpoolsHandler != nil:
+    result.taskpoolsHandler = taskpoolsHandler
+  else:
+    # Create a default taskpools handler that uses the traditional handler
+    # This is a simplified wrapper for backward compatibility
+    result.taskpoolsHandler = proc(data: IsolatableRequestData): ResponseData {.gcsafe.} =
+      var headers: HttpHeaders
+      headers["Content-Type"] = "text/plain"
+      result = createResponseData(200, headers, "TaskPools default handler - implement your own!")
 
-  # Configure execution model (both use thread pool for now)
-  result.workerThreads.setLen(workerThreads)
+  # Configure execution model and threading
+  case executionModel:
+  of ThreadPool:
+    result.workerThreads.setLen(workerThreads)
+  of TaskPools:
+    # Use fewer fixed threads for I/O and WebSocket processing
+    result.workerThreads.setLen(max(2, workerThreads div 5))
+    try:
+      result.taskpool = Taskpool.new()
+    except CatchableError as e:
+      raise newException(MummyError, "Failed to create taskpool: " & e.msg)
 
   # Stuff that can fail
   try:
