@@ -2,17 +2,20 @@
 ## This demonstrates basic SSE capabilities
 
 import ../src/mummy, ../src/mummy/routers
-import std/[json, times, strutils, options, os, sequtils]
+import std/[json, times, strutils, options, os, sequtils, locks]
 
-# Global storage for active connections
+# Global storage for active connections  
+var L: Lock
 var activeConnections: seq[SSEConnection] = @[]
+initLock(L)
 
-proc handleSSE(request: Request) =
+proc handleSSE(request: Request) {.gcsafe.} =
   echo "Starting SSE connection for: ", request.remoteAddress
 
   let connection = request.respondSSE()
   {.gcsafe.}:
-    activeConnections.add(connection)
+    withLock L:
+      activeConnections.add(connection)
 
   # Send initial welcome event
   connection.send(SSEEvent(
@@ -30,46 +33,58 @@ proc handleTriggerUpdate(request: Request) {.gcsafe.} =
 
   # Send update to all active connections
   {.gcsafe.}:
-    for connection in activeConnections:
-      if connection.active:
-        connection.send(SSEEvent(
-          event: some("manual_update"),
-          data: """{"timestamp": """ & timestamp & """, "message": "Manual update triggered", "type": "manual"}""",
-          id: some("manual-" & $now().toTime().toUnix())
-        ))
-        inc sentCount
+    withLock L:
+      for connection in activeConnections:
+        if connection.active:
+          connection.send(SSEEvent(
+            event: some("manual_update"),
+            data: """{"timestamp": """ & timestamp & """, "message": "Manual update triggered", "type": "manual"}""",
+            id: some("manual-" & $now().toTime().toUnix())
+          ))
+          inc sentCount
 
-    # Clean up inactive connections
-    activeConnections = activeConnections.filter(proc(conn: SSEConnection): bool = conn.active)
+      # Clean up inactive connections
+      activeConnections = activeConnections.filter(proc(conn: SSEConnection): bool = conn.active)
 
+  var connectionCount: int
+  {.gcsafe.}:
+    withLock L:
+      connectionCount = activeConnections.len
   request.respond(200, @[("Content-Type", "application/json")],
-                 """{"sent_to": """ & $sentCount & """, "active_connections": """ & $activeConnections.len & """}""")
+                 """{"sent_to": """ & $sentCount & """, "active_connections": """ & $connectionCount & """}""")
 
 # Endpoint to send periodic updates
 proc handleStartUpdates(request: Request) {.gcsafe.} =
   var sentCount = 0
 
   # Send 5 updates with 1 second delay between them
+  for i in 1..5:
+    let timestamp = $now()
+    {.gcsafe.}:
+      withLock L:
+        for connection in activeConnections:
+          if connection.active:
+            connection.send(SSEEvent(
+              event: some("auto_update"),
+              data: """{"timestamp": """ & timestamp & """, "counter": """ & $i & """, "message": "Auto update #""" & $i & """", "type": "automatic"}""",
+              id: some("auto-" & $i)
+            ))
+            inc sentCount
+
+    if i < 5: # Don't sleep after the last update
+      sleep(1000)
+
+  # Clean up inactive connections
   {.gcsafe.}:
-    for i in 1..5:
-      let timestamp = $now()
-      for connection in activeConnections:
-        if connection.active:
-          connection.send(SSEEvent(
-            event: some("auto_update"),
-            data: """{"timestamp": """ & timestamp & """, "counter": """ & $i & """, "message": "Auto update #""" & $i & """", "type": "automatic"}""",
-            id: some("auto-" & $i)
-          ))
-          inc sentCount
+    withLock L:
+      activeConnections = activeConnections.filter(proc(conn: SSEConnection): bool = conn.active)
 
-      if i < 5: # Don't sleep after the last update
-        sleep(1000)
-
-    # Clean up inactive connections
-    activeConnections = activeConnections.filter(proc(conn: SSEConnection): bool = conn.active)
-
+  var connectionCount: int
+  {.gcsafe.}:
+    withLock L:
+      connectionCount = activeConnections.len
   request.respond(200, @[("Content-Type", "application/json")],
-                 """{"updates_sent": 5, "total_events": """ & $sentCount & """, "active_connections": """ & $activeConnections.len & """}""")
+                 """{"updates_sent": 5, "total_events": """ & $sentCount & """, "active_connections": """ & $connectionCount & """}""")
 
 proc handleRoot(request: Request) {.gcsafe.} =
   let html = """

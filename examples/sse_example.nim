@@ -53,7 +53,7 @@ proc handleStatus(request: Request) =
   {.gcsafe.}:
     withLock connectionsLock:
       activeCount = activeConnections.len
-  let response = """{"active_connections": """ & $activeCount & """, "timestamp": """ & $now() & """}"""
+  let response = """{"active_connections": """ & $activeCount & """, "timestamp": """" & $now() & """"}"""
   request.respond(200, @[("Content-Type", "application/json")], response)
 
 proc handleRoot(request: Request) {.gcsafe.} =

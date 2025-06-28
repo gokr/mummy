@@ -10,25 +10,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 nimble install -y
 
 # Run main test suite
-nim c -r -d:useMalloc tests/test.nim
+nim c -r tests/test.nim
 
 # Run HTTP tests
-nim c -r -d:useMalloc tests/test_http.nim
+nim c -r tests/test_http.nim
 
 # Run HTTP/2 tests
-nim c -r -d:useMalloc tests/test_http2.nim
+nim c -r tests/test_http2.nim
 
 # Run WebSocket tests
-nim c -r -d:useMalloc tests/test_websockets.nim
+nim c -r tests/test_websockets.nim
 
 # Run multipart tests
-nim c -r -d:useMalloc tests/test_multipart.nim
+nim c -r tests/test_multipart.nim
 
 # Run router tests
-nim c -r -d:useMalloc tests/test_routers.nim
+nim c -r tests/test_routers.nim
 
 # Run fuzzer (for security testing)
-nim c -r -d:useMalloc -d:mummyNoWorkers tests/fuzz_recv.nim
+nim c -r -d:mummyNoWorkers tests/fuzz_recv.nim
 ```
 
 ### Running Examples
@@ -104,7 +104,6 @@ Mummy is a multithreaded HTTP/WebSocket server that handles socket I/O on one th
 - HTTP protocol compliance tests
 - WebSocket protocol tests
 - Fuzzing for security validation
-- Memory usage testing with `-d:useMalloc`
 
 ### Performance Considerations
 - Optimized for API servers, not large file serving
