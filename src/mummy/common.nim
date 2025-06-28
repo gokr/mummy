@@ -42,20 +42,6 @@ proc contains*(pathParams: PathParams, key: string): bool =
 proc getOrDefault*(pathParams: PathParams, key, default: string): string =
   if key in pathParams: pathParams[key] else: default
 
-type
-  SSEConnection* = object
-    ## Represents an active Server-Sent Events connection
-    server*: pointer # Will be cast to Server when needed
-    clientSocket*: SocketHandle
-    clientId*: uint64
-    active*: bool
-
-  SSEEvent* = object
-    ## Represents a Server-Sent Events message
-    event*: Option[string]  ## Optional event type
-    data*: string          ## The data payload (required)
-    id*: Option[string]    ## Optional event ID for client-side event tracking
-    retry*: Option[int]    ## Optional retry timeout in milliseconds
 
 proc echoLogger*(level: LogLevel, args: varargs[string]) =
   ## This is a simple echo logger.

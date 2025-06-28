@@ -1,4 +1,4 @@
-import common, std/nativesockets, webby/httpheaders, std/endians, std/strutils, std/options
+import common, std/nativesockets, webby/httpheaders, std/endians, std/strutils
 
 template currentExceptionAsMummyError*(): untyped =
   let e = getCurrentException()
@@ -186,40 +186,3 @@ proc strictParseHex*(s: openarray[char]): int =
 
   result = bits.int
 
-proc formatSSEEvent*(event: SSEEvent): string {.raises: [], gcsafe.} =
-  ## Format an SSE event according to the Server-Sent Events specification
-  ## https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
-  
-  result = ""
-  
-  # Add event type if specified
-  if event.event.isSome:
-    result.add("event: " & event.event.get() & "\n")
-  
-  # Add event ID if specified
-  if event.id.isSome:
-    result.add("id: " & event.id.get() & "\n")
-  
-  # Add retry timeout if specified
-  if event.retry.isSome:
-    result.add("retry: " & $event.retry.get() & "\n")
-  
-  # Add data field(s) - handle multiline data properly
-  if event.data.len > 0:
-    # Split multiline data and prefix each line with "data: "
-    var pos = 0
-    while pos < event.data.len:
-      result.add("data: ")
-      let lineStart = pos
-      while pos < event.data.len and event.data[pos] != '\n':
-        inc pos
-      result.add(event.data[lineStart ..< pos])
-      result.add("\n")
-      if pos < event.data.len: # Skip the \n
-        inc pos
-  else:
-    # Empty data field
-    result.add("data: \n")
-  
-  # End event with empty line
-  result.add("\n")
