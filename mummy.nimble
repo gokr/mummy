@@ -24,3 +24,5 @@ task test, "Run tests":
   exec "nim c -r tests/test_sse.nim"
   exec "nim c -r tests/test_sse_simple.nim"
   exec "nim c -r tests/test_sse_final.nim"
+  exec "nim c -r tests/test_requestsmuggling.nim"
+  exec "nim c -r tests/test_sleep.nim"
