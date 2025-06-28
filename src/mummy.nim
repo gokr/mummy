@@ -127,6 +127,7 @@ type
       outgoingBuffers: Deque[OutgoingBuffer]
       closeFrameQueuedAt: float64
       upgradedToWebSocket, closeFrameSent: bool
+      upgradedToSSE: bool  # Track if this connection is used for SSE
       sendsWaitingForUpgrade: seq[OutgoingBuffer]
       requestCounter: int # Incoming request incs, outgoing response decs
 
@@ -151,7 +152,7 @@ type
   OutgoingBuffer {.acyclic.} = ref object
     clientSocket: SocketHandle
     clientId: uint64
-    closeConnection, isWebSocketUpgrade, isCloseFrame: bool
+    closeConnection, isWebSocketUpgrade, isCloseFrame, isSSEUpgrade: bool
     buffer1, buffer2: string
     bytesSent: int
 
@@ -442,6 +443,113 @@ proc upgradeToWebSocket*(
   headers["Sec-WebSocket-Accept"] = base64.encode(hash)
 
   request.respond(101, headers)
+
+proc respondSSE*(
+  request: Request,
+  headers: sink HttpHeaders = emptyHttpHeaders()
+): SSEConnection {.raises: [MummyError], gcsafe.} =
+  ## Starts a Server-Sent Events (SSE) response for real-time streaming.
+  ## Sets appropriate SSE headers and keeps the connection open.
+  ## Returns an SSEConnection that can be used to send events.
+  
+  if request.responded:
+    raise newException(
+      MummyError,
+      "Cannot start SSE on a request that has already received a response"
+    )
+  
+  # Set required SSE headers
+  headers["Content-Type"] = "text/event-stream"
+  headers["Cache-Control"] = "no-cache"
+  headers["Connection"] = "keep-alive"
+  headers["Access-Control-Allow-Origin"] = "*"
+  headers["Access-Control-Allow-Headers"] = "Cache-Control"
+  
+  # Create SSE connection object
+  result = SSEConnection(
+    server: cast[pointer](request.server),
+    clientSocket: request.clientSocket,
+    clientId: request.clientId,
+    active: true
+  )
+  
+  # Create the initial SSE response without Content-Length
+  var encodedResponse = OutgoingBuffer()
+  encodedResponse.clientSocket = request.clientSocket
+  encodedResponse.clientId = request.clientId
+  encodedResponse.closeConnection = false  # Keep connection alive
+  encodedResponse.isSSEUpgrade = true
+  
+  # Mark this connection as SSE in the DataEntry - we'll handle this in the event loop
+  # For now, we rely on the isSSEUpgrade flag in OutgoingBuffer
+  
+  encodedResponse.buffer1 = encodeHeaders(200, headers)
+  
+  # Queue the initial response
+  var queueWasEmpty: bool
+  withLock request.server.responseQueueLock:
+    queueWasEmpty = request.server.responseQueue.len == 0
+    request.server.responseQueue.addLast(move encodedResponse)
+  
+  if queueWasEmpty:
+    request.server.trigger(request.server.responseQueued)
+  
+  # Mark request as responded to prevent double responses
+  request.responded = true
+
+proc send*(
+  connection: SSEConnection,
+  event: SSEEvent
+) {.raises: [], gcsafe.} =
+  ## Send an SSE event to the client.
+  ## This is thread-safe and can be called from any thread.
+  
+  if not connection.active:
+    return
+  
+  let server = cast[Server](connection.server)
+  let formattedEvent = formatSSEEvent(event)
+  
+  # Create outgoing buffer for the SSE event
+  var buffer = OutgoingBuffer()
+  buffer.clientSocket = connection.clientSocket
+  buffer.clientId = connection.clientId
+  buffer.closeConnection = false  # Keep connection alive
+  buffer.isSSEUpgrade = true
+  buffer.buffer1 = formattedEvent
+  
+  # Queue the event for sending
+  var queueWasEmpty: bool
+  withLock server.responseQueueLock:
+    queueWasEmpty = server.responseQueue.len == 0
+    server.responseQueue.addLast(move buffer)
+  
+  if queueWasEmpty:
+    server.trigger(server.responseQueued)
+
+proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
+  ## Close the SSE connection.
+  ## This marks the connection as inactive and will close the underlying socket.
+  
+  connection.active = false
+  
+  let server = cast[Server](connection.server)
+  
+  # Mark the connection for closure
+  var buffer = OutgoingBuffer()
+  buffer.clientSocket = connection.clientSocket
+  buffer.clientId = connection.clientId
+  buffer.closeConnection = true
+  buffer.isSSEUpgrade = true
+  
+  # Queue connection closure
+  var queueWasEmpty: bool
+  withLock server.responseQueueLock:
+    queueWasEmpty = server.responseQueue.len == 0
+    server.responseQueue.addLast(move buffer)
+  
+  if queueWasEmpty:
+    server.trigger(server.responseQueued)
 
 proc workerProc(server: Server) {.raises: [].} =
   # The worker threads run the task queue here
@@ -1063,10 +1171,17 @@ proc afterRecv(
   clientSocket: SocketHandle,
   dataEntry: DataEntry
 ): bool {.raises: [IOSelectorsException].} =
-  # Have we upgraded this connection to a websocket?
+  # Have we upgraded this connection to a websocket or SSE?
   # If not, treat incoming bytes as part of HTTP requests.
   if dataEntry.upgradedToWebSocket:
     server.afterRecvWebSocket(clientSocket, dataEntry)
+  elif dataEntry.upgradedToSSE:
+    # SSE connections are unidirectional (server -> client)
+    # Any data received from client should close the connection
+    if dataEntry.bytesReceived > 0:
+      server.log(DebugLevel, "Received unexpected data on SSE connection, closing")
+      return true # Close connection
+    return false
   else:
     server.afterRecvHttp(clientSocket, dataEntry)
 
@@ -1203,6 +1318,8 @@ proc loopForever(server: Server) {.raises: [OSError, IOSelectorsException].} =
                     if encodedFrame.isCloseFrame:
                       clientDataEntry.closeFrameQueuedAt = epochTime()
                 clientDataEntry.sendsWaitingForUpgrade.setLen(0)
+            elif encodedResponse.isSSEUpgrade:
+              clientDataEntry.upgradedToSSE = true
           else:
             # Was this file descriptor reused for a different client?
             server.log(DebugLevel, "Dropped response to disconnected client")
