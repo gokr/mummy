@@ -70,6 +70,20 @@ type
   MessageKind* = enum
     TextMessage, BinaryMessage, Ping, Pong
 
+  SSEConnection* = object
+    ## Represents an active Server-Sent Events connection
+    server*: Server
+    clientSocket*: SocketHandle
+    clientId*: uint64
+    active*: bool
+
+  SSEEvent* = object
+    ## Represents a Server-Sent Events message
+    event*: Option[string]
+    data*: string
+    id*: Option[string]
+    retry*: Option[int]
+
   RequestHandler* = proc(request: Request) {.gcsafe.}
 
   WebSocketHandler* = proc(
@@ -467,7 +481,7 @@ proc respondSSE*(
   
   # Create SSE connection object
   result = SSEConnection(
-    server: cast[pointer](request.server),
+    server: request.server,
     clientSocket: request.clientSocket,
     clientId: request.clientId,
     active: true
@@ -497,6 +511,44 @@ proc respondSSE*(
   # Mark request as responded to prevent double responses
   request.responded = true
 
+proc formatSSEEvent*(event: SSEEvent): string {.raises: [], gcsafe.} =
+  ## Format an SSE event according to the Server-Sent Events specification
+  ## https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+  
+  result = ""
+  
+  # Add event type if specified
+  if event.event.isSome:
+    result.add("event: " & event.event.get() & "\n")
+  
+  # Add event ID if specified
+  if event.id.isSome:
+    result.add("id: " & event.id.get() & "\n")
+  
+  # Add retry timeout if specified
+  if event.retry.isSome:
+    result.add("retry: " & $event.retry.get() & "\n")
+  
+  # Add data field(s) - handle multiline data properly
+  if event.data.len > 0:
+    # Split multiline data and prefix each line with "data: "
+    var pos = 0
+    while pos < event.data.len:
+      result.add("data: ")
+      let lineStart = pos
+      while pos < event.data.len and event.data[pos] != '\n':
+        inc pos
+      result.add(event.data[lineStart ..< pos])
+      result.add("\n")
+      if pos < event.data.len: # Skip the \n
+        inc pos
+  else:
+    # Empty data field
+    result.add("data: \n")
+  
+  # End event with empty line
+  result.add("\n")
+
 proc send*(
   connection: SSEConnection,
   event: SSEEvent
@@ -507,7 +559,7 @@ proc send*(
   if not connection.active:
     return
   
-  let server = cast[Server](connection.server)
+  let server = connection.server
   let formattedEvent = formatSSEEvent(event)
   
   # Create outgoing buffer for the SSE event
@@ -515,7 +567,6 @@ proc send*(
   buffer.clientSocket = connection.clientSocket
   buffer.clientId = connection.clientId
   buffer.closeConnection = false  # Keep connection alive
-  buffer.isSSEUpgrade = true
   buffer.buffer1 = formattedEvent
   
   # Queue the event for sending
@@ -533,14 +584,13 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   connection.active = false
   
-  let server = cast[Server](connection.server)
+  let server = connection.server
   
   # Mark the connection for closure
   var buffer = OutgoingBuffer()
   buffer.clientSocket = connection.clientSocket
   buffer.clientId = connection.clientId
   buffer.closeConnection = true
-  buffer.isSSEUpgrade = true
   
   # Queue connection closure
   var queueWasEmpty: bool
@@ -550,6 +600,10 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   if queueWasEmpty:
     server.trigger(server.responseQueued)
+
+proc close*(connection: SSEConnection) {.raises: [], gcsafe.} =
+  var conn = connection
+  close(conn)
 
 proc workerProc(server: Server) {.raises: [].} =
   # The worker threads run the task queue here
