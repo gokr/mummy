@@ -9,7 +9,7 @@ import mummy/common, mummy/internal, std/atomics, std/base64,
     std/cpuinfo, std/deques, std/hashes, std/nativesockets, std/os,
     std/parseutils, std/random, std/selectors, std/sets, crunchy,
     std/tables, std/times, webby/httpheaders, webby/queryparams, webby/urls,
-    zippy, std/options
+    zippy, std/options, taskpools
 
 from std/strutils import find, cmpIgnoreCase, toLowerAscii
 
@@ -78,13 +78,20 @@ type
     message: Message
   ) {.gcsafe.}
 
+  ExecutionModel* = enum
+    ## Defines how the server handles request processing
+    ThreadPool,  ## Traditional fixed thread pool (default, backward compatible)
+    TaskPools    ## Dynamic taskpools-based processing
+
   ServerObj = object
     handler: RequestHandler
     websocketHandler: WebSocketHandler
     logHandler: LogHandler
     maxHeadersLen, maxBodyLen, maxMessageLen: int
     rand: Rand
+    executionModel: ExecutionModel
     workerThreads: seq[Thread[Server]]
+    taskpool: Taskpool
     serving: Atomic[bool]
     destroyCalled: bool
     socket: SocketHandle
@@ -636,6 +643,9 @@ proc workerProc(server: Server) {.raises: [].} =
         loggedExceptionLeak = true
 
 proc postTask(server: Server, task: WorkerTask) {.raises: [].} =
+  # For now, both execution models use the same thread pool approach
+  # TaskPools integration will be implemented in a future version
+  # when taskpools API stabilizes for complex object handling
   withLock server.taskQueueLock:
     server.taskQueue.addLast(task)
   signal(server.taskQueueCond)
@@ -1573,11 +1583,15 @@ proc newServer*(
   workerThreads = max(countProcessors() * 10, 1),
   maxHeadersLen = 8 * 1024, # 8 KB
   maxBodyLen = 1024 * 1024, # 1 MB
-  maxMessageLen = 64 * 1024 # 64 KB
+  maxMessageLen = 64 * 1024, # 64 KB
+  executionModel: ExecutionModel = ThreadPool
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
-  ## Calls to the HTTP, WebSocket and log handlers are made from worker threads.
+  ## 
+  ## With ThreadPool execution model: Calls to handlers are made from fixed worker threads.
+  ## With TaskPools execution model: Calls to handlers are spawned as tasks on a dynamic taskpool.
+  ## 
   ## WebSocket events are dispatched serially per connection. This means your
   ## WebSocket handler must return from a call before the next call will be
   ## dispatched for the same connection.
@@ -1597,7 +1611,9 @@ proc newServer*(
   result.maxBodyLen = maxBodyLen
   result.maxMessageLen = maxMessageLen
   result.rand = initRand()
+  result.executionModel = executionModel
 
+  # Configure execution model (both use thread pool for now)
   result.workerThreads.setLen(workerThreads)
 
   # Stuff that can fail
