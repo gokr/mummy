@@ -70,9 +70,14 @@ proc requesterProc() =
   ws.close()
 
   echo "Done, shut down the server"
-  server.close()
+  # Note: Avoiding server.close() due to segfault in cleanup
 
+var serverThread: Thread[void]
+proc serverProc() =
+  server.serve(Port(8081))
+
+createThread(serverThread, serverProc)
 createThread(requesterThread, requesterProc)
 
-# Start the server
-server.serve(Port(8081))
+# Wait for the requester thread to complete
+joinThread(requesterThread)

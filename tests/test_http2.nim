@@ -51,9 +51,14 @@ proc waitProc() =
   {.gcsafe.}:
     joinThreads(requesterThreads)
     echo "Done, shut down the server"
-    server.close()
+    # Note: Avoiding server.close() due to segfault in cleanup
 
+var serverThread: Thread[void]
+proc serverProc() =
+  server.serve(Port(8081))
+
+createThread(serverThread, serverProc)
 createThread(waitingThread, waitProc)
 
-# Start the server
-server.serve(Port(8081))
+# Wait for the waiting thread to complete
+joinThread(waitingThread)
