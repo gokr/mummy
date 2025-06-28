@@ -74,7 +74,7 @@ type
     body*: string
     closeConnection*: bool
 
-  TaskPoolsHandler* = proc(data: IsolatableRequestData): ResponseData {.gcsafe.}
+  TaskPoolsHandler* = proc(data: IsolatableRequestData, ctx: pointer): ResponseData {.gcsafe.}
 
   # Forward declarations and interdependent types
   Server* = ptr ServerObj
@@ -118,7 +118,6 @@ type
       request: Request
     of TaskPoolsTask:
       isolatableData: IsolatableRequestData
-      taskPoolsHandler: TaskPoolsHandler
       clientSocket: SocketHandle
     of WebSocketTask:
       websocket: WebSocket
@@ -180,6 +179,7 @@ type
     taskpoolsHandler: TaskPoolsHandler
     websocketHandler: WebSocketHandler
     logHandler: LogHandler
+    taskpoolsHandlerContext: pointer  # Context for taskpools handler
     maxHeadersLen, maxBodyLen, maxMessageLen: int
     rand: Rand
     executionModel: ExecutionModel
@@ -312,6 +312,7 @@ proc trigger(
 
 proc responseDataToOutgoingBuffer*(responseData: ResponseData, clientSocket: SocketHandle, clientId: uint64): OutgoingBuffer {.gcsafe.} =
   ## Convert ResponseData to OutgoingBuffer for sending
+  result = OutgoingBuffer()
   result.clientSocket = clientSocket
   result.clientId = clientId
   result.closeConnection = responseData.closeConnection
@@ -338,36 +339,37 @@ proc responseDataToOutgoingBuffer*(responseData: ResponseData, clientSocket: Soc
   
   result.buffer1 = response
 
-proc executeTaskpoolsRequest*(data: IsolatableRequestData, handler: TaskPoolsHandler): ResponseData {.gcsafe.} =
+proc executeTaskpoolsRequest*(data: IsolatableRequestData, handler: TaskPoolsHandler, ctx: pointer): ResponseData {.gcsafe.} =
   ## Execute a taskpools request with proper error handling
   try:
-    result = handler(data)
+    result = handler(data, ctx)
   except:
     let e = getCurrentException()
     var headers: HttpHeaders
     headers["Content-Type"] = "text/plain"
     result = createResponseData(500, headers, "Handler Exception: " & e.msg)
 
-# TaskPools-related functions for future implementation
-# Currently disabled due to taskpools library limitations with procedure isolation
-
-# proc simpleTask(path: string) {.gcsafe.} =
-#   ## Simple task for testing taskpools integration
-#   discard # Just a placeholder for now
-
-# proc processTaskpoolsRequest(data: IsolatableRequestData, clientSocket: SocketHandle, clientId: uint64) {.gcsafe.} =
-#   ## Process a taskpools request (simplified version for demo)
-#   ## This function is spawned on the taskpool
-#   
-#   # For now, use a simple default response since we can't easily pass handler
-#   var headers: HttpHeaders
-#   headers["Content-Type"] = "text/plain"
-#   let responseData = createResponseData(200, headers, "TaskPools response for: " & data.path)
-#   let outgoingBuffer = responseDataToOutgoingBuffer(responseData, clientSocket, clientId)
-#   
-#   # TODO: Need to implement proper response queuing mechanism for taskpools
-#   # For now, this is a simplified version that doesn't queue responses
-#   discard # outgoingBuffer would need to be sent back to main thread
+proc processTaskpoolsRequest(
+  data: IsolatableRequestData,
+  clientSocket: SocketHandle,
+  server: Server
+) {.gcsafe.} =
+  ## Process a taskpools request by executing the handler and queueing the response
+  let responseData = executeTaskpoolsRequest(data, server.taskpoolsHandler, server.taskpoolsHandlerContext)
+  
+  # Queue the response for sending - create OutgoingBuffer in main thread context
+  var queueWasEmpty: bool
+  withLock server.responseQueueLock:
+    queueWasEmpty = server.responseQueue.len == 0
+    let outgoingBuffer = responseDataToOutgoingBuffer(
+      responseData,
+      clientSocket,
+      data.clientId
+    )
+    server.responseQueue.addLast(outgoingBuffer)
+  
+  if queueWasEmpty:
+    server.trigger(server.responseQueued)
 
 proc headerContainsToken(headers: var HttpHeaders, key, token: string): bool =
   # If a header looks like `Accept-Encoding: gzip,deflate` then we may want to
@@ -744,19 +746,13 @@ proc workerProc(server: Server) {.raises: [].} =
       `=destroy`(task.request[])
       deallocShared(task.request)
     of TaskPoolsTask:
-      # TaskPools tasks shouldn't reach worker threads - they're handled by taskpools directly
-      # This is a fallback case that shouldn't normally be reached
-      let responseData = executeTaskpoolsRequest(task.isolatableData, task.taskPoolsHandler)
-      let outgoingBuffer = responseDataToOutgoingBuffer(responseData, task.clientSocket, task.isolatableData.clientId)
-      
-      # Queue the response for sending
-      var queueWasEmpty: bool
-      withLock server.responseQueueLock:
-        queueWasEmpty = server.responseQueue.len == 0
-        server.responseQueue.addLast(outgoingBuffer)
-      
-      if queueWasEmpty:
-        server.trigger(server.responseQueued)
+      # This should never be reached because TaskPools tasks are processed by the taskpool
+      # Log to stderr and do nothing
+      try:
+        var msg = "Critical: TaskPoolsTask processed by worker thread. This should not happen."
+        discard writeBuffer(stderr, msg.cstring, msg.len)
+      except:
+        discard # Ignore errors when writing to stderr
     of WebSocketTask:
       withLock server.websocketQueuesLock:
         if server.websocketClaimed.getOrDefault(task.websocket, true):
@@ -815,7 +811,15 @@ proc workerProc(server: Server) {.raises: [].} =
     let task = server.taskQueue.popFirst()
     release(server.taskQueueLock)
 
-    runTask(task)
+    try:
+      runTask(task)
+    except:
+      try:
+        let e = getCurrentException()
+        var msg = "Worker thread exception: " & e.msg & "\n" & e.getStackTrace()
+        discard writeBuffer(stderr, msg.cstring, msg.len)
+      except:
+        discard # Ignore errors when writing to stderr
 
     when defined(mummyCheck22398):
       # https://github.com/nim-lang/Nim/issues/22398
@@ -832,15 +836,16 @@ proc postTask(server: Server, task: WorkerTask) {.raises: [].} =
     signal(server.taskQueueCond)
   of TaskPools:
     # TaskPools execution model
-    # For now, fall back to thread pool until taskpools integration is fully resolved
     case task.kind:
-    of ThreadPoolTask, TaskPoolsTask:
-      # Fall back to thread pool for now
-      withLock server.taskQueueLock:
-        server.taskQueue.addLast(task)
-      signal(server.taskQueueCond)
-    of WebSocketTask:
-      # WebSockets still use thread pool for serial processing
+    of TaskPoolsTask:
+      # Spawn the task on the taskpool
+      spawn server.taskpool, processTaskpoolsRequest(
+        task.isolatableData,
+        task.clientSocket,
+        server
+      )
+    of ThreadPoolTask, WebSocketTask:
+      # Fall back to thread pool for ThreadPoolTask and WebSocketTask
       withLock server.taskQueueLock:
         server.taskQueue.addLast(task)
       signal(server.taskQueueCond)
@@ -1331,7 +1336,17 @@ proc afterRecvHttp(
 
       if chunkLen == 0: # A chunk of len 0 marks the end of the request body
         let request = server.popRequest(clientSocket, dataEntry)
-        server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
+        if server.executionModel == TaskPools:
+          let isolatableData = toIsolatableRequestData(request)
+          `=destroy`(request[])
+          deallocShared(request)
+          server.postTask(WorkerTask(
+            kind: TaskPoolsTask,
+            isolatableData: isolatableData,
+            clientSocket: clientSocket
+          ))
+        else:
+          server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
   else:
     if dataEntry.requestState.contentLength > server.maxBodyLen:
       server.log(DebugLevel, "Dropped connection, body too long")
@@ -1369,7 +1384,17 @@ proc afterRecvHttp(
         dataEntry.bytesReceived = bytesRemaining
 
     let request = server.popRequest(clientSocket, dataEntry)
-    server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
+    if server.executionModel == TaskPools:
+      let isolatableData = toIsolatableRequestData(request)
+      `=destroy`(request[])
+      deallocShared(request)
+      server.postTask(WorkerTask(
+        kind: TaskPoolsTask,
+        isolatableData: isolatableData,
+        clientSocket: clientSocket
+      ))
+    else:
+      server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
 
 proc afterRecv(
   server: Server,
@@ -1780,7 +1805,8 @@ proc newServer*(
   maxBodyLen = 1024 * 1024, # 1 MB
   maxMessageLen = 64 * 1024, # 64 KB
   executionModel: ExecutionModel = ThreadPool,
-  taskpoolsHandler: TaskPoolsHandler = nil
+  taskpoolsHandler: TaskPoolsHandler = nil,
+  taskpoolsHandlerContext: pointer = nil
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
@@ -1813,12 +1839,42 @@ proc newServer*(
   if taskpoolsHandler != nil:
     result.taskpoolsHandler = taskpoolsHandler
   else:
-    # Create a default taskpools handler that uses the traditional handler
-    # This is a simplified wrapper for backward compatibility
-    result.taskpoolsHandler = proc(data: IsolatableRequestData): ResponseData {.gcsafe.} =
-      var headers: HttpHeaders
-      headers["Content-Type"] = "text/plain"
-      result = createResponseData(200, headers, "TaskPools default handler - implement your own!")
+    # Create a taskpools handler that wraps the traditional handler
+    # For now, use a simplified approach that calls the handler with a mock request
+    result.taskpoolsHandler = proc(data: IsolatableRequestData, ctx: pointer): ResponseData {.gcsafe.} =
+      # Create a temporary Request object from IsolatableRequestData
+      let request = cast[Request](allocShared0(sizeof(RequestObj)))
+      request.httpMethod = data.httpMethod
+      request.path = data.path
+      request.queryParams = data.queryParams
+      request.headers = data.headers
+      request.body = data.body
+      request.remoteAddress = data.remoteAddress
+      request.server = cast[Server](ctx)
+      request.responded = false
+      
+      # Call the original handler
+      try:
+        let server = cast[Server](ctx)
+        server.handler(request)
+        # For now, return a simple success response
+        # TODO: Implement proper response capture mechanism
+        var headers = emptyHttpHeaders()
+        headers["Content-Type"] = "text/plain"
+        result = createResponseData(200, headers, "Handled by TaskPools execution model at " & $now())
+      except:
+        let e = getCurrentException()
+        var headers = emptyHttpHeaders()
+        headers["Content-Type"] = "text/plain"
+        result = createResponseData(500, headers, "Handler Exception: " & e.msg)
+      finally:
+        deallocShared(request)
+
+  # Set taskpools handler context to point to the server
+  if taskpoolsHandlerContext != nil:
+    result.taskpoolsHandlerContext = taskpoolsHandlerContext
+  else:
+    result.taskpoolsHandlerContext = cast[pointer](result)
 
   # Configure execution model and threading
   case executionModel:
@@ -1831,6 +1887,8 @@ proc newServer*(
       result.taskpool = Taskpool.new()
     except CatchableError as e:
       raise newException(MummyError, "Failed to create taskpool: " & e.msg)
+  else:
+    result.taskpool = nil
 
   # Stuff that can fail
   try:
@@ -1858,7 +1916,7 @@ proc newServer*(
     initLock(result.sendQueueLock)
     initLock(result.websocketQueuesLock)
 
-    for i in 0 ..< workerThreads:
+    for i in 0 ..< result.workerThreads.len:
       createThread(result.workerThreads[i], workerProc, result)
   except:
     result.destroy(true)

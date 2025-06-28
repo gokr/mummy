@@ -49,17 +49,17 @@ proc demonstrateTaskPools() =
   var router = Router()
   router.get("/*", handleRequest)
   
-  # Create server with taskpools execution (currently uses ThreadPool internally)
+  # Create server with taskpools execution
   let server = newServer(
     handler = router,  # Router automatically converted to RequestHandler
-    workerThreads = 4,
-    executionModel = TaskPools  # Future TaskPools mode
+    workerThreads = 2,  # Fewer worker threads since taskpool handles requests
+    executionModel = TaskPools  # TaskPools mode
   )
   
   echo "Server running on http://localhost:8081 with TaskPools execution"
-  echo "Note: TaskPools currently uses ThreadPool internally - full implementation coming soon"
   echo "Try: curl http://localhost:8081/taskpools"
   echo "Try: curl http://localhost:8081/info"
+  echo "Note: Requests are processed by the taskpool, not the worker threads"
   echo "Press Ctrl+C to stop"
   
   server.serve(Port(8081))
