@@ -87,7 +87,7 @@ proc createUploadEndpoint(request: Request) =
             discard
     
     # Create upload session
-    let uploadId = request.createUpload(filename, uploadLength)
+    let uploadId = request.createUpload(filename, uploadLength, "application/octet-stream")
     
     # TUS location header
     headers["Location"] = fmt"/files/{uploadId}"
@@ -126,12 +126,17 @@ proc patchUploadEndpoint(request: Request) =
   addTUSHeaders(headers)
   
   try:
+    echo "PATCH request received for upload"
     let uploadId = request.pathParams["uploadId"]
-    let upload = request.getUpload(uploadId)
+    echo fmt"Upload ID: {uploadId}"
     
+    let upload = request.getUpload(uploadId)
     if upload == nil:
+      echo "Upload not found"
       request.respond(404, headers, "Upload not found")
       return
+    
+    echo fmt"Current bytes received: {upload[].bytesReceived}"
     
     # Check Upload-Offset header
     var offsetHeader = ""
@@ -140,11 +145,15 @@ proc patchUploadEndpoint(request: Request) =
         offsetHeader = value
         break
     if offsetHeader.len == 0:
+      echo "Missing Upload-Offset header"
       request.respond(400, headers, "Upload-Offset header required")
       return
     
     let expectedOffset = offsetHeader.parseBiggestInt()
+    echo fmt"Expected offset: {expectedOffset}"
+    
     if expectedOffset != upload[].bytesReceived:
+      echo fmt"Offset mismatch: expected {upload[].bytesReceived}, got {expectedOffset}"
       request.respond(409, headers, fmt"Offset mismatch: expected {upload[].bytesReceived}, got {expectedOffset}")
       return
     
@@ -155,28 +164,36 @@ proc patchUploadEndpoint(request: Request) =
         contentType = value
         break
     if contentType != "application/offset+octet-stream":
+      echo fmt"Invalid Content-Type: {contentType}"
       request.respond(400, headers, "Content-Type must be application/offset+octet-stream")
       return
     
     # Open file for writing if not already open
     if upload[].status == UploadPending:
+      echo "Opening file for writing"
       upload[].openForWriting()
     
     # Write the chunk
     if request.body.len > 0:
+      echo fmt"Writing chunk of size: {request.body.len} bytes"
       upload[].writeChunk(request.body.toOpenArrayByte(0, request.body.len - 1))
+      echo fmt"New bytes received: {upload[].bytesReceived}"
     
     # Update headers with new offset
     headers["Upload-Offset"] = $upload[].bytesReceived
     
     # Check if upload is complete
     if upload[].bytesReceived >= upload[].totalSize:
+      echo "Completing upload"
       upload[].completeUpload()
       echo fmt"TUS upload completed: {upload[].finalPath}"
     
     request.respond(204, headers)
+    echo "PATCH request handled successfully"
     
   except Exception as e:
+    echo fmt"Error in PATCH handler: {e.msg}"
+    echo getStackTrace(e)
     request.respond(500, headers, fmt"Error uploading chunk: {e.msg}")
 
 proc deleteUploadEndpoint(request: Request) =
@@ -385,7 +402,7 @@ let server = newServer(
   router,
   enableUploads = true,
   uploadConfig = uploadConfig,
-  maxBodyLen = 10 * 1024 * 1024  # 10MB chunks
+  maxBodyLen = 100 * 1024 * 1024  # 100MB chunks
 )
 
 echo "TUS Resumable Upload Server"

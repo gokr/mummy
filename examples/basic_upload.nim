@@ -114,10 +114,11 @@ router.get("/", uploadHandler)
 router.post("/", uploadHandler)
 
 # Create basic server (no upload streaming for this simple example)
-let server = newServer(router)
+let server = newServer(router, maxBodyLen = 20 * 1024 * 1024)  # 20MB max
 
 echo "Basic Upload Server"
 echo "=================="
+echo "Max file size (maxBodyLen): 20MB (adjust in code)"
 echo "Upload directory: uploads/"
 echo "Serving on http://localhost:8080"
 

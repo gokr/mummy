@@ -289,7 +289,6 @@ proc createRangeUpload(request: Request) =
 proc rangeUploadHandler(request: Request) =
   ## Handle range upload PATCH requests
   let uploadId = request.pathParams["uploadId"]
-  
   # Get Content-Range header
   var contentRange = ""
   for (key, value) in request.headers:
@@ -306,7 +305,7 @@ proc rangeUploadHandler(request: Request) =
 var router: Router
 router.get("/", indexHandler)
 router.post("/range/create", createRangeUpload)
-router.patch("/range/upload/*uploadId", rangeUploadHandler)
+router.patch("/range/upload/@uploadId", rangeUploadHandler)
 
 # Configure upload settings
 var uploadConfig = defaultUploadConfig()
@@ -327,6 +326,7 @@ echo "HTTP Range Upload Server"
 echo "======================="
 echo "Protocol: RFC 7233 Range Requests"
 echo "Method: PATCH with Content-Range headers"
+echo "Max file size: 1GB"
 echo "Chunk size: 64KB"
 echo "Upload directory: uploads/"
 echo "Features: pause, resume, precise positioning"
