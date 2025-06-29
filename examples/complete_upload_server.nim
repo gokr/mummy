@@ -24,8 +24,8 @@
 ## This example is the recommended starting point for production upload servers
 ## as it supports all major standards and provides maximum client compatibility.
 
-import ../src/mummy, ../src/mummy/routers, ../src/mummy/tus
-import std/[strformat, json, os, strutils, times, sha1]
+import ../src/mummy, ../src/mummy/routers, ../src/mummy/tus, ../src/mummy/ranges, ../src/mummy/multipart
+import std/[strformat, json, os, strutils, times, sha1, base64]
 
 proc indexHandler(request: Request) =
   ## Serve comprehensive upload demo page
@@ -52,10 +52,10 @@ proc indexHandler(request: Request) =
 </head>
 <body>
     <h1>Complete Upload Server Demo</h1>
-    <p>This server demonstrates all advanced upload features including TUS resumable uploads, Range requests, checksum verification, and rate limiting.</p>
+    <p>This server demonstrates all advanced upload features including TUS resumable uploads, Range requests, and checksum verification.</p>
     
     <div class="demo-section">
-        <h2>🚀 TUS Resumable Uploads</h2>
+        <h2>&#128640; TUS Resumable Uploads</h2>
         <div class="feature">
             <strong>Features:</strong> Pause, resume, cross-session recovery, checksum verification
         </div>
@@ -73,15 +73,15 @@ proc indexHandler(request: Request) =
     </div>
     
     <div class="demo-section">
-        <h2>📊 Range Request Uploads</h2>
+        <h2>&#128202; Range Request Uploads</h2>
         <div class="feature">
             <strong>Features:</strong> HTTP Range headers, partial uploads, precise positioning
         </div>
         <input type="file" id="rangeFile">
         <br><br>
-        <button onclick="startRangeUpload()">Start Range Upload</button>
-        <button onclick="pauseRangeUpload()" disabled>Pause Range</button>
-        <button onclick="resumeRangeUpload()" disabled>Resume Range</button>
+        <button onclick="startRangeUpload()" id="rangeStartBtn">Start Range Upload</button>
+        <button onclick="pauseRangeUpload()" id="rangePauseBtn" disabled>Pause Range</button>
+        <button onclick="resumeRangeUpload()" id="rangeResumeBtn" disabled>Resume Range</button>
         
         <div class="progress">
             <div class="progress-bar" id="rangeProgressBar" style="width: 0%"></div>
@@ -90,7 +90,7 @@ proc indexHandler(request: Request) =
     </div>
     
     <div class="demo-section">
-        <h2>🔒 Checksum Verification</h2>
+        <h2>&#128274; Checksum Verification</h2>
         <div class="feature">
             <strong>Features:</strong> SHA1 integrity checking, automatic verification, corruption detection
         </div>
@@ -105,11 +105,6 @@ proc indexHandler(request: Request) =
         <div id="checksumStatus" class="status">Select a file for checksum upload</div>
     </div>
     
-    <div class="demo-section">
-        <h2>📈 Upload Statistics</h2>
-        <button onclick="refreshStats()">Refresh Statistics</button>
-        <div id="stats" class="status">Click refresh to see upload statistics</div>
-    </div>
     
     <div class="log" id="log"></div>
 
@@ -165,6 +160,7 @@ proc indexHandler(request: Request) =
             const options = {
                 endpoint: '/tus/',
                 retryDelays: [0, 3000, 5000, 10000],
+                chunkSize: 5 * 1024 * 1024,  // 5MB chunks
                 metadata: {
                     filename: file.name,
                     filetype: file.type
@@ -268,6 +264,7 @@ proc indexHandler(request: Request) =
         
         async function uploadRangeChunks() {
             const chunkSize = 64 * 1024; // 64KB chunks
+            updateRangeButtons(true, false);
             
             while (rangeOffset < rangeFile.size && !rangePaused) {
                 const end = Math.min(rangeOffset + chunkSize - 1, rangeFile.size - 1);
@@ -287,16 +284,18 @@ proc indexHandler(request: Request) =
                         rangeOffset = end + 1;
                         const percentage = (rangeOffset / rangeFile.size * 100).toFixed(2);
                         document.getElementById('rangeProgressBar').style.width = percentage + '%';
-                        document.getElementById('rangeStatus').textContent = 
+                        document.getElementById('rangeStatus').textContent =
                             `Range uploading: ${formatBytes(rangeOffset)} / ${formatBytes(rangeFile.size)} (${percentage}%)`;
                         
                         await new Promise(resolve => setTimeout(resolve, 50)); // Throttle
                     } else {
                         log(`Range upload error: ${response.status}`);
+                        updateRangeButtons(false, false);
                         break;
                     }
                 } catch (error) {
                     log(`Range upload error: ${error.message}`);
+                    updateRangeButtons(false, false);
                     break;
                 }
             }
@@ -304,7 +303,29 @@ proc indexHandler(request: Request) =
             if (rangeOffset >= rangeFile.size) {
                 log('Range upload completed');
                 document.getElementById('rangeStatus').textContent = 'Range upload completed!';
+                updateRangeButtons(false, false);
+            } else if (rangePaused) {
+                log('Range upload paused');
+                document.getElementById('rangeStatus').textContent = 'Range upload paused';
+                updateRangeButtons(true, true);
             }
+        }
+        
+        function updateRangeButtons(uploading, paused) {
+            document.getElementById('rangeStartBtn').disabled = uploading && !paused;
+            document.getElementById('rangePauseBtn').disabled = !uploading || paused;
+            document.getElementById('rangeResumeBtn').disabled = !uploading || !paused;
+        }
+        
+        function pauseRangeUpload() {
+            rangePaused = true;
+            log('Range upload paused');
+        }
+        
+        function resumeRangeUpload() {
+            rangePaused = false;
+            log('Range upload resumed');
+            uploadRangeChunks();
         }
         
         // Checksum Upload Functions
@@ -324,7 +345,7 @@ proc indexHandler(request: Request) =
                 const formData = new FormData();
                 formData.append('file', file);
                 if (expectedChecksum) {
-                    formData.append('checksum', expectedChecksum);
+                    formData.append('expectedChecksum', expectedChecksum);
                 }
                 
                 const response = await fetch('/checksum/upload', {
@@ -335,9 +356,9 @@ proc indexHandler(request: Request) =
                 const result = await response.json();
                 if (result.success) {
                     document.getElementById('checksumProgressBar').style.width = '100%';
-                    document.getElementById('checksumStatus').textContent = 
-                        `Checksum upload completed! Calculated: ${result.checksum}`;
-                    log(`Checksum verified: ${result.checksum}`);
+                    document.getElementById('checksumStatus').textContent =
+                        `Checksum upload completed! Calculated: ${result.calculatedChecksum}`;
+                    log(`Checksum verified: ${result.calculatedChecksum}`);
                 } else {
                     document.getElementById('checksumStatus').textContent = `Checksum error: ${result.error}`;
                     log(`Checksum error: ${result.error}`);
@@ -347,26 +368,9 @@ proc indexHandler(request: Request) =
             }
         }
         
-        // Statistics
-        async function refreshStats() {
-            try {
-                const response = await fetch('/stats');
-                const stats = await response.json();
-                
-                document.getElementById('stats').innerHTML = `
-                    <strong>Upload Statistics:</strong><br>
-                    Total uploads: ${stats.total}<br>
-                    Active uploads: ${stats.active}<br>
-                    Completed uploads: ${stats.completed}<br>
-                    Failed uploads: ${stats.failed}
-                `;
-            } catch (error) {
-                document.getElementById('stats').textContent = 'Error getting stats: ' + error.message;
-            }
-        }
-        
         // Initialize
         updateTUSButtons(false, false);
+        updateRangeButtons(false, false);
         log('Complete upload server ready');
         log('Features: TUS resumable, Range requests, Checksum verification');
     </script>
@@ -376,14 +380,176 @@ proc indexHandler(request: Request) =
   
   request.respond(200, headers, html)
 
-proc tusHandler(request: Request) =
-  ## Handle TUS protocol requests
-  # Extract upload ID from path
-  let uploadId = extractUploadIdFromPath(request.path, "/tus/")
+const
+  TUS_VERSION = "1.0.0"
+  TUS_MAX_SIZE = 1024 * 1024 * 1024  # 1GB
+  TUS_MAX_CHUNK_SIZE = 200 * 1024 * 1024  # 200MB chunk limit
+
+proc addTUSHeaders(headers: var HttpHeaders) =
+  ## Add common TUS headers to response
+  headers["Tus-Resumable"] = TUS_VERSION
+  headers["Tus-Version"] = TUS_VERSION
+  headers["Tus-Max-Size"] = $TUS_MAX_SIZE
+  headers["Access-Control-Allow-Origin"] = "*"
+  headers["Access-Control-Allow-Methods"] = "POST, HEAD, PATCH, DELETE, OPTIONS"
+  headers["Access-Control-Allow-Headers"] = "Content-Type, Upload-Length, Upload-Offset, Tus-Resumable, Upload-Metadata"
+  headers["Access-Control-Expose-Headers"] = "Upload-Offset, Location, Upload-Length, Tus-Version, Tus-Resumable, Tus-Max-Size, Tus-Extension, Upload-Metadata"
+
+proc tusOptionsHandler(request: Request) =
+  ## Handle OPTIONS requests for CORS
+  var headers: HttpHeaders
+  addTUSHeaders(headers)
+  request.respond(204, headers)
+
+proc tusCreateHandler(request: Request) =
+  ## Create new upload (TUS protocol POST)
+  var headers: HttpHeaders
+  addTUSHeaders(headers)
   
-  # Handle TUS request
-  let tusResponse = request.handleTUSRequest(uploadId)
-  request.respondTUS(tusResponse)
+  try:
+    # Extract upload length from headers
+    var uploadLengthHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-length":
+        uploadLengthHeader = value
+        break
+    if uploadLengthHeader.len == 0:
+      request.respond(400, headers, "Upload-Length header required")
+      return
+    
+    let uploadLength = uploadLengthHeader.parseBiggestInt()
+    if uploadLength <= 0 or uploadLength > TUS_MAX_SIZE:
+      request.respond(413, headers, "Invalid upload length")
+      return
+    
+    # Extract metadata
+    var filename = "upload.bin"
+    var metadataHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-metadata":
+        metadataHeader = value
+        break
+    if metadataHeader.len > 0:
+      # Parse base64-encoded metadata (simplified)
+      let pairs = metadataHeader.split(",")
+      for pair in pairs:
+        let parts = pair.strip().split(" ", 1)
+        if parts.len == 2 and parts[0] == "filename":
+          try:
+            filename = decode(parts[1])
+          except:
+            discard
+    
+    # Create upload session
+    let uploadId = request.createUpload(filename, uploadLength, "application/octet-stream")
+    
+    # TUS location header
+    headers["Location"] = fmt"/tus/{uploadId}"
+    headers["Upload-Offset"] = "0"
+    
+    request.respond(201, headers)
+    
+  except Exception as e:
+    request.respond(500, headers, fmt"Error creating upload: {e.msg}")
+
+proc tusHeadHandler(request: Request) =
+  ## Get upload status (TUS protocol HEAD)
+  var headers: HttpHeaders
+  addTUSHeaders(headers)
+  
+  try:
+    let uploadId = request.pathParams["uploadId"]
+    let upload = request.getUpload(uploadId)
+    
+    if upload == nil:
+      request.respond(404, headers, "Upload not found")
+      return
+    
+    headers["Upload-Offset"] = $upload[].bytesReceived
+    headers["Upload-Length"] = $upload[].totalSize
+    headers["Cache-Control"] = "no-store"
+    
+    request.respond(200, headers)
+    
+  except Exception as e:
+    request.respond(500, headers, fmt"Error getting upload status: {e.msg}")
+
+proc tusPatchHandler(request: Request) =
+  ## Append data to upload (TUS protocol PATCH)
+  var headers: HttpHeaders
+  addTUSHeaders(headers)
+  
+  try:
+    let uploadId = request.pathParams["uploadId"]
+    let upload = request.getUpload(uploadId)
+    if upload == nil:
+      request.respond(404, headers, "Upload not found")
+      return
+    
+    # Check Upload-Offset header
+    var offsetHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-offset":
+        offsetHeader = value
+        break
+    if offsetHeader.len == 0:
+      request.respond(400, headers, "Upload-Offset header required")
+      return
+    
+    let expectedOffset = offsetHeader.parseBiggestInt()
+    if expectedOffset != upload[].bytesReceived:
+      request.respond(409, headers, fmt"Offset mismatch: expected {upload[].bytesReceived}, got {expectedOffset}")
+      return
+    
+    # Check Content-Type
+    var contentType = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "content-type":
+        contentType = value
+        break
+    if contentType != "application/offset+octet-stream":
+      request.respond(400, headers, "Content-Type must be application/offset+octet-stream")
+      return
+    
+    # Open file for writing if not already open
+    if upload[].status == UploadPending:
+      upload[].openForWriting()
+    
+    # Write the chunk with size validation
+    if request.body.len > 0:
+      if request.body.len > TUS_MAX_CHUNK_SIZE:
+        request.respond(413, headers, "Chunk size exceeds server limit")
+        return
+      
+      upload[].writeChunk(request.body.toOpenArrayByte(0, request.body.len - 1))
+    
+    # Update headers with new offset
+    headers["Upload-Offset"] = $upload[].bytesReceived
+    
+    # Check if upload is complete
+    if upload[].bytesReceived >= upload[].totalSize:
+      upload[].completeUpload()
+    
+    request.respond(204, headers)
+    
+  except Exception as e:
+    request.respond(500, headers, fmt"Error uploading chunk: {e.msg}")
+
+proc tusDeleteHandler(request: Request) =
+  ## Delete/cancel upload (TUS protocol DELETE)
+  var headers: HttpHeaders
+  addTUSHeaders(headers)
+  
+  try:
+    let uploadId = request.pathParams["uploadId"]
+    let upload = request.getUpload(uploadId)
+    if upload != nil:
+      upload[].cancelUpload()
+    
+    request.respond(204, headers)
+    
+  except Exception as e:
+    request.respond(500, headers, fmt"Error deleting upload: {e.msg}")
 
 proc rangeCreateHandler(request: Request) =
   ## Create upload session for range requests
@@ -437,25 +603,76 @@ proc rangeUploadHandler(request: Request) =
     request.respond(400, emptyHttpHeaders(), "Content-Range header required")
 
 proc checksumUploadHandler(request: Request) =
-  ## Handle checksum verification upload
+  ## Handle upload with checksum verification
   var headers: HttpHeaders
   headers["Content-Type"] = "application/json"
   
   try:
-    # For this demo, we'll simulate checksum verification
-    # In reality, you'd parse multipart and verify checksums
+    # Parse multipart form data
+    let multipart = request.decodeMultipart()
+    var fileData = ""
+    var expectedChecksum = ""
+    var filename = "upload.bin"
     
-    let fileData = request.body
+    # Extract file data and checksum from multipart
+    for entry in multipart:
+      case entry.name:
+      of "file":
+        if entry.filename.isSome and entry.data.isSome:
+          filename = entry.filename.get()
+          let (start, last) = entry.data.get()
+          fileData = request.body[start .. last]
+      of "expectedChecksum":
+        if entry.data.isSome:
+          let (start, last) = entry.data.get()
+          expectedChecksum = request.body[start .. last]
+    
+    if fileData.len == 0:
+      let response = %*{
+        "success": false,
+        "error": "No file data found"
+      }
+      request.respond(400, headers, $response)
+      return
+    
+    # Calculate actual checksum
     let calculatedChecksum = $secureHash(fileData)
     
+    # Create upload with checksum verification
+    let uploadId = request.createUpload(filename, fileData.len.int64)
+    let upload = request.getUpload(uploadId)
+    
+    if upload != nil:
+      if expectedChecksum.len > 0:
+        upload[].setExpectedChecksum(expectedChecksum)
+      
+      # Write and complete upload
+      upload[].openForWriting()
+      upload[].writeChunk(fileData.toOpenArrayByte(0, fileData.len - 1))
+      upload[].completeUpload()
+      
+      let response = %*{
+        "success": true,
+        "calculatedChecksum": calculatedChecksum,
+        "expectedChecksum": expectedChecksum,
+        "filename": filename,
+        "size": fileData.len,
+        "uploadPath": upload[].finalPath
+      }
+      request.respond(200, headers, $response)
+    else:
+      let response = %*{
+        "success": false,
+        "error": "Failed to create upload session"
+      }
+      request.respond(500, headers, $response)
+      
+  except UploadError as e:
     let response = %*{
-      "success": true,
-      "checksum": calculatedChecksum,
-      "size": fileData.len
+      "success": false,
+      "error": e.msg
     }
-    
-    request.respond(200, headers, $response)
-    
+    request.respond(400, headers, $response)
   except Exception as e:
     let response = %*{
       "success": false,
@@ -463,42 +680,25 @@ proc checksumUploadHandler(request: Request) =
     }
     request.respond(500, headers, $response)
 
-proc statsHandler(request: Request) =
-  ## Return upload statistics
-  var headers: HttpHeaders
-  headers["Content-Type"] = "application/json"
-  
-  # For this demo, return dummy stats
-  let response = %*{
-    "total": 0,
-    "active": 0,
-    "completed": 0,
-    "failed": 0
-  }
-  
-  request.respond(200, headers, $response)
 
 # Router setup
 var router: Router
 router.get("/", indexHandler)
 
 # TUS endpoints
-router.options("/tus/", tusHandler)
-router.options("/tus/*uploadId", tusHandler)
-router.post("/tus/", tusHandler)
-router.head("/tus/*uploadId", tusHandler)
-router.patch("/tus/*uploadId", tusHandler)
-router.delete("/tus/*uploadId", tusHandler)
+router.options("/tus/", tusOptionsHandler)
+router.options("/tus/@uploadId", tusOptionsHandler)
+router.post("/tus/", tusCreateHandler)
+router.head("/tus/@uploadId", tusHeadHandler)
+router.patch("/tus/@uploadId", tusPatchHandler)
+router.delete("/tus/@uploadId", tusDeleteHandler)
 
 # Range upload endpoints
 router.post("/range/create", rangeCreateHandler)
-router.patch("/range/upload/*uploadId", rangeUploadHandler)
+router.patch("/range/upload/@uploadId", rangeUploadHandler)
 
 # Checksum upload
 router.post("/checksum/upload", checksumUploadHandler)
-
-# Statistics
-router.get("/stats", statsHandler)
 
 # Configure advanced upload settings
 var uploadConfig = defaultUploadConfig()
@@ -522,16 +722,15 @@ let server = newServer(
   enableUploads = true,
   uploadConfig = uploadConfig,
   tusConfig = tusConfig,
-  maxBodyLen = 100 * 1024 * 1024  # 100MB for non-streaming uploads
+  maxBodyLen = 200 * 1024 * 1024  # 50MB for non-streaming uploads (multipart, etc)
 )
 
 echo "Complete Upload Server"
 echo "====================="
-echo "🚀 TUS Protocol: Full resumable upload support"
-echo "📊 Range Requests: HTTP Range header support"
-echo "🔒 Checksums: SHA1 integrity verification"
-echo "⚡ Streaming: Direct-to-disk for large files"
-echo "📈 Statistics: Real-time upload monitoring"
+echo "* TUS Protocol: Full resumable upload support"
+echo "* Range Requests: HTTP Range header support"
+echo "* Checksums: SHA1 integrity verification"
+echo "* Streaming: Direct-to-disk for large files"
 echo ""
 echo "Features enabled:"
 echo "  ✓ TUS 1.0 resumable uploads"
@@ -540,8 +739,7 @@ echo "  ✓ Checksum verification"
 echo "  ✓ Thread-safe operations"
 echo "  ✓ Atomic file operations"
 echo "  ✓ Progress tracking"
-echo "  ✓ Upload statistics"
 echo ""
-echo "Serving on http://localhost:8080"
+echo "Serving on http://localhost:8082"
 
-server.serve(Port(8080))
+server.serve(Port(8082))
