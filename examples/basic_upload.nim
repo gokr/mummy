@@ -26,7 +26,7 @@
 ## - examples/tus_upload.nim (TUS protocol)
 ## - examples/range_upload.nim (HTTP Range requests)
 
-import ../src/mummy, ../src/mummy/routers
+import ../src/mummy, ../src/mummy/routers, ../src/mummy/multipart
 import std/[strformat, os, strutils]
 
 proc uploadHandler(request: Request) =
