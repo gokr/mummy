@@ -1,4 +1,4 @@
-import std/typetraits, std/options, std/nativesockets
+import std/typetraits, std/nativesockets
 
 type
   MummyError* = object of CatchableError

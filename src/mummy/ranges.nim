@@ -1,8 +1,7 @@
 ## HTTP Range request support (RFC 7233) for partial uploads and downloads
 ## Implements Range header parsing and Content-Range response generation
 
-import std/[strutils, parseutils, sequtils, strformat, algorithm, random]
-import common
+import std/[strutils, strformat, algorithm, random]
 
 type
   RangeError* = object of CatchableError
