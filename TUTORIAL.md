@@ -204,7 +204,7 @@ sequenceDiagram
     loop Every Second
         Server->>Client: data: Update #1
         Server->>Client: data: Update #2
-        ...
+        Server->>Client: data: Update #3
     end
 
     Server->>Client: Close Connection
