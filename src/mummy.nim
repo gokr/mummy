@@ -5,13 +5,14 @@ when not defined(nimdoc):
 when not compileOption("threads"):
   {.error: "Using --threads:on is required by Mummy.".}
 
-import mummy/common, mummy/internal, mummy/uploads, std/atomics, std/base64,
-    std/cpuinfo, std/deques, std/hashes, std/nativesockets, std/os,
-    std/parseutils, std/random, std/selectors, std/sets, crunchy,
-    std/tables, std/times, webby/httpheaders, webby/queryparams, webby/urls,
-    zippy, std/options, taskpools
+import mummy/common, mummy/internal, mummy/uploads, mummy/tus, mummy/ranges,
+    std/atomics, std/base64, std/cpuinfo, std/deques, std/hashes, 
+    std/nativesockets, std/os, std/parseutils, std/random, std/selectors, 
+    std/sets, crunchy, std/tables, std/times, webby/httpheaders, 
+    webby/queryparams, webby/urls, zippy, std/options, taskpools
 
-from std/strutils import find, cmpIgnoreCase, toLowerAscii
+from std/strutils import find, cmpIgnoreCase, toLowerAscii, toUpperAscii
+import std/strformat
 
 when defined(linux):
   when defined(nimdoc):
@@ -25,7 +26,7 @@ when defined(linux):
 
 import std/locks
 
-export Port, common, httpheaders, queryparams, uploads
+export Port, common, httpheaders, queryparams, uploads, tus, ranges
 
 const
   whitespace = {' ', '\t'}
@@ -205,6 +206,7 @@ type
     uploadManager: UploadManager
     uploadManagerLock: Lock
     enableUploads: bool
+    tusConfig: TUSConfig
 
   # Types moved above in main type section
 
@@ -730,74 +732,9 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   if queueWasEmpty:
     connection.server.trigger(connection.server.responseQueued)
 
-# Upload-related helper functions
+# Upload functions previously here - moved to end of file
 
-proc createUpload*(
-  request: Request,
-  filename: string,
-  maxSize: int64 = -1
-): string {.raises: [MummyError], gcsafe.} =
-  ## Create a new upload session and return upload ID
-  if not request.server.enableUploads:
-    raise newException(MummyError, "Uploads are not enabled on this server")
-  
-  withLock request.server.uploadManagerLock:
-    try:
-      let contentType = request.headers.getOrDefault("Content-Type", "application/octet-stream")
-      let totalSize = if maxSize > 0: maxSize else: -1
-      result = request.server.uploadManager.createUpload(filename, request.clientId, totalSize, contentType)
-    except UploadError as e:
-      raise newException(MummyError, "Failed to create upload: " & e.msg)
-
-proc getUpload*(
-  request: Request,
-  uploadId: string
-): ptr UploadSession {.gcsafe.} =
-  ## Get upload session by ID
-  if not request.server.enableUploads:
-    return nil
-  
-  withLock request.server.uploadManagerLock:
-    result = request.server.uploadManager.getUpload(uploadId)
-
-proc resumeUpload*(
-  request: Request,
-  uploadId: string
-): ptr UploadSession {.gcsafe.} =
-  ## Resume an existing upload session
-  if not request.server.enableUploads:
-    return nil
-  
-  withLock request.server.uploadManagerLock:
-    result = request.server.uploadManager.resumeUpload(uploadId, request.clientId)
-
-proc cancelUpload*(
-  request: Request,
-  uploadId: string
-) {.gcsafe.} =
-  ## Cancel an upload session
-  if not request.server.enableUploads:
-    return
-  
-  withLock request.server.uploadManagerLock:
-    request.server.uploadManager.removeUpload(uploadId)
-
-proc getUploadStats*(server: Server): tuple[total: int, active: int, completed: int, failed: int] {.gcsafe.} =
-  ## Get upload statistics
-  if not server.enableUploads:
-    result = (total: 0, active: 0, completed: 0, failed: 0)
-    return
-  
-  withLock server.uploadManagerLock:
-    result = server.uploadManager.getUploadStats()
-
-proc cleanupUploads*(server: Server) {.gcsafe.} =
-  ## Clean up expired uploads
-  if not server.enableUploads:
-    return
-  
-  withLock server.uploadManagerLock:
-    server.uploadManager.cleanupExpiredUploads()
+# Upload/TUS functions are defined at the end of the file to avoid conflicts
 
 proc workerProc(server: Server) {.raises: [].} =
   # The worker threads run the task queue here
@@ -1883,7 +1820,8 @@ proc newServer*(
   taskpoolsHandler: TaskPoolsHandler = nil,
   taskpoolsHandlerContext: pointer = nil,
   uploadConfig: UploadConfig = defaultUploadConfig(),
-  enableUploads: bool = false
+  enableUploads: bool = false,
+  tusConfig: TUSConfig = defaultTUSConfig()
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
@@ -1995,6 +1933,7 @@ proc newServer*(
     
     # Initialize upload support
     result.enableUploads = enableUploads
+    result.tusConfig = tusConfig
     if enableUploads:
       result.uploadManager = newUploadManager(uploadConfig)
       initLock(result.uploadManagerLock)
@@ -2027,3 +1966,123 @@ proc waitUntilReady*(server: Server, timeout: float = 10) =
     if delta > timeout:
       raise newException(MummyError, "Timeout while waiting for server")
     sleep(100)
+
+# Upload helper functions for Request objects
+
+proc createUpload*(
+  request: Request,
+  filename: string,
+  totalSize: int64 = -1,
+  contentType: string = "application/octet-stream"
+): string {.gcsafe.} =
+  ## Create a new upload session for this request
+  if not request.server.enableUploads:
+    raise newException(MummyError, "Uploads not enabled on server")
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.createUpload(filename, request.clientId, totalSize, contentType)
+
+proc getUpload*(request: Request, uploadId: string): ptr UploadSession {.gcsafe.} =
+  ## Get upload session by ID
+  if not request.server.enableUploads:
+    return nil
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.getUpload(uploadId)
+
+proc handleTUSRequest*(
+  request: Request,
+  uploadId: string = ""
+): TUSResponse {.gcsafe.} =
+  ## Handle TUS protocol request
+  if not request.server.enableUploads:
+    result = createTUSResponse(501, request.server.tusConfig)
+    result.body = "Uploads not enabled"
+    return
+  
+  let tusHeaders = parseTUSHeaders(request.headers)
+  let validation = validateTUSRequest(request.httpMethod, tusHeaders, request.server.tusConfig)
+  
+  if not validation.valid:
+    result = createTUSResponse(400, request.server.tusConfig)
+    result.body = validation.error
+    return
+  
+  withLock request.server.uploadManagerLock:
+    case request.httpMethod.toUpperAscii():
+    of "OPTIONS":
+      result = handleTUSOptions(request.server.tusConfig)
+    of "POST":
+      result = handleTUSCreation(tusHeaders, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "HEAD":
+      result = handleTUSStatus(uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "PATCH":
+      result = handleTUSUpload(tusHeaders, request.body, uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "DELETE":
+      result = handleTUSTermination(uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    else:
+      result = createTUSResponse(405, request.server.tusConfig)
+      result.body = "Method not allowed"
+
+proc respondTUS*(request: Request, tusResponse: TUSResponse) {.gcsafe.} =
+  ## Send TUS response
+  request.respond(tusResponse.statusCode, tusResponse.headers, tusResponse.body)
+
+proc handleRangeRequest*(
+  request: Request,
+  uploadId: string,
+  contentRangeHeader: string
+) {.gcsafe.} =
+  ## Handle HTTP Range request for uploads
+  if not request.server.enableUploads:
+    request.respond(501, emptyHttpHeaders(), "Uploads not enabled")
+    return
+  
+  try:
+    let (rangeStart, rangeEnd, total) = parseUploadRange(contentRangeHeader)
+    
+    withLock request.server.uploadManagerLock:
+      let upload = request.server.uploadManager.getUpload(uploadId)
+      if upload == nil:
+        request.respond(404, emptyHttpHeaders(), "Upload not found")
+        return
+      
+      # Verify client ownership
+      let clientUploads = request.server.uploadManager.sessionsByClient.getOrDefault(request.clientId, @[])
+      if uploadId notin clientUploads:
+        request.respond(403, emptyHttpHeaders(), "Upload not owned by client")
+        return
+      
+      # Ensure upload is ready for writing
+      if upload[].status == UploadPending:
+        upload[].openForWriting()
+      elif upload[].status != UploadInProgress:
+        request.respond(410, emptyHttpHeaders(), "Upload no longer active")
+        return
+      
+      # Write range data
+      if request.body.len > 0:
+        upload[].writeRangeChunk(request.body.toOpenArrayByte(0, request.body.len - 1), rangeStart, rangeEnd)
+      
+      # Check if upload is complete
+      if total > 0 and upload[].bytesReceived >= total:
+        upload[].completeUpload()
+      
+      var headers: HttpHeaders
+      headers["Content-Range"] = fmt"bytes {rangeStart}-{rangeEnd}/{total}"
+      request.respond(204, headers, "")
+      
+  except ranges.RangeError as e:
+    request.respond(400, emptyHttpHeaders(), "Invalid range: " & e.msg)
+  except UploadError as e:
+    request.respond(500, emptyHttpHeaders(), "Upload error: " & e.msg)
+
+proc getUploadStats*(server: Server): tuple[total: int, active: int, completed: int, failed: int] {.gcsafe.} =
+  ## Get upload statistics
+  if not server.enableUploads:
+    return (0, 0, 0, 0)
+  
+  withLock server.uploadManagerLock:
+    result = server.uploadManager.getUploadStats()
+
+# TUS helper functions are exported directly from the tus module

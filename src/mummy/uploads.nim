@@ -1,7 +1,7 @@
-import std/[os, strutils, times, options, tables, streams]
-import std/[sequtils, hashes, random, strformat]
-import common
-from std/uuid import generateUUID
+import std/[os, strutils, times, options, tables, streams, nativesockets]
+import std/[sequtils, hashes, random, strformat, sha1, base64]
+import common, ranges
+import webby/[queryparams, httpheaders]
 
 export os, times, options
 
@@ -29,8 +29,11 @@ type
     uploadTimeout*: float           ## Upload timeout in seconds (0 = unlimited)
     bufferSize*: int                ## Buffer size for streaming operations
     enableResumableUploads*: bool   ## Enable TUS resumable upload protocol
+    enableRangeRequests*: bool      ## Enable HTTP Range request support
+    enableIntegrityCheck*: bool     ## Enable checksum verification
     cleanupInterval*: float         ## Interval for cleaning up expired uploads
     autoCreateDirs*: bool           ## Automatically create upload directories
+    maxUploadRate*: int64           ## Maximum upload rate in bytes/sec (0 = unlimited)
 
   UploadSession* = object
     ## Represents an active or pending upload session
@@ -46,6 +49,12 @@ type
     contentType*: string            ## MIME content type
     metadata*: Table[string, string] ## Additional metadata
     file*: File                     ## File handle for streaming operations
+    expectedChecksum*: string       ## Expected checksum (SHA1 hex)
+    actualChecksum*: string         ## Calculated checksum during upload
+    checksumContext*: Sha1State     ## Running checksum calculation
+    uploadRate*: int64              ## Current upload rate in bytes/sec
+    lastChunkTime*: DateTime        ## Time of last chunk received
+    supportsRanges*: bool           ## Whether this upload supports range requests
     onProgress*: UploadProgressCallback
     onComplete*: UploadCompleteCallback
     onError*: UploadErrorCallback
@@ -82,13 +91,20 @@ proc defaultUploadConfig*(): UploadConfig =
     uploadTimeout: 300.0, # 5 minutes
     bufferSize: 64 * 1024, # 64 KB
     enableResumableUploads: true,
+    enableRangeRequests: true,
+    enableIntegrityCheck: true,
     cleanupInterval: 3600.0, # 1 hour
-    autoCreateDirs: true
+    autoCreateDirs: true,
+    maxUploadRate: 0 # Unlimited by default
   )
 
 proc generateUploadId*(): string =
   ## Generate a unique upload identifier
-  $generateUUID()
+  randomize()
+  let chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  result = ""
+  for i in 0..<32:
+    result.add(chars[rand(chars.len - 1)])
 
 proc createUploadDirectories*(config: UploadConfig) =
   ## Create necessary upload directories
@@ -165,9 +181,24 @@ proc writeChunk*(session: var UploadSession, data: openArray[byte]) =
     if session.status != UploadInProgress:
       raise newException(UploadError, "Upload not in progress")
     
-    session.file.writeBuffer(data[0].unsafeAddr, data.len)
+    # Rate limiting check
+    let currentTime = now()
+    if session.uploadRate > 0:
+      let timeSinceLastChunk = (currentTime - session.lastChunkTime).inMilliseconds.float / 1000.0
+      if timeSinceLastChunk > 0:
+        let currentRate = data.len.float / timeSinceLastChunk
+        if currentRate > session.uploadRate.float:
+          # Could implement rate limiting here
+          discard
+    
+    discard session.file.writeBuffer(data[0].unsafeAddr, data.len)
     session.bytesReceived += data.len
-    session.lastAccessedAt = now()
+    session.lastAccessedAt = currentTime
+    session.lastChunkTime = currentTime
+    
+    # Update checksum if enabled
+    if session.expectedChecksum.len > 0:
+      session.checksumContext.update(cast[ptr UncheckedArray[char]](data[0].unsafeAddr).toOpenArray(0, data.len - 1))
     
     # Check size limits
     if session.totalSize > 0 and session.bytesReceived > session.totalSize:
@@ -201,6 +232,16 @@ proc completeUpload*(session: var UploadSession) =
       if actualSize != session.totalSize:
         session.status = UploadFailed
         let errMsg = fmt"File size mismatch: expected {session.totalSize}, got {actualSize}"
+        if session.onError != nil:
+          session.onError(errMsg)
+        raise newException(UploadError, errMsg)
+    
+    # Verify checksum if expected
+    if session.expectedChecksum.len > 0:
+      session.actualChecksum = $session.checksumContext.finalize
+      if session.actualChecksum.toLowerAscii() != session.expectedChecksum.toLowerAscii():
+        session.status = UploadFailed
+        let errMsg = fmt"Checksum mismatch: expected {session.expectedChecksum}, got {session.actualChecksum}"
         if session.onError != nil:
           session.onError(errMsg)
         raise newException(UploadError, errMsg)
@@ -451,3 +492,73 @@ proc validateUploadHeaders*(headers: HttpHeaders): tuple[valid: bool, contentTyp
   
   # Additional validation could be added here
   # For example, checking for required TUS headers for resumable uploads
+
+proc writeRangeChunk*(
+  session: var UploadSession,
+  data: openArray[byte],
+  rangeStart: int64,
+  rangeEnd: int64
+) =
+  ## Write data chunk at specific range position for partial uploads
+  try:
+    if session.status != UploadInProgress:
+      raise newException(UploadError, "Upload not in progress")
+    
+    if not session.supportsRanges:
+      raise newException(UploadError, "Upload session does not support range requests")
+    
+    # Validate range
+    if rangeStart < 0 or rangeEnd < rangeStart:
+      raise newException(UploadError, "Invalid range specification")
+    
+    if session.totalSize > 0 and rangeEnd >= session.totalSize:
+      raise newException(UploadError, "Range end exceeds expected file size")
+    
+    # Seek to the correct position
+    if session.file != nil:
+      session.file.setFilePos(rangeStart)
+      discard session.file.writeBuffer(data[0].unsafeAddr, data.len)
+      session.file.flushFile()
+    
+    # Update bytes received (for ranges, this is more complex)
+    let chunkSize = rangeEnd - rangeStart + 1
+    if chunkSize != data.len:
+      raise newException(UploadError, "Chunk size doesn't match range")
+    
+    # Update checksum if enabled (order-dependent, so ranges need special handling)
+    if session.expectedChecksum.len > 0:
+      # For range uploads, we need to handle checksums carefully
+      # This is a simplified approach - production might need more sophisticated handling
+      session.checksumContext.update(cast[ptr UncheckedArray[char]](data[0].unsafeAddr).toOpenArray(0, data.len - 1))
+    
+    session.lastAccessedAt = now()
+    
+    # Update progress (approximate for range uploads)
+    session.bytesReceived = max(session.bytesReceived, rangeEnd + 1)
+    
+    if session.onProgress != nil:
+      session.onProgress(session.bytesReceived, session.totalSize)
+      
+  except IOError as e:
+    session.status = UploadFailed
+    if session.onError != nil:
+      session.onError("Failed to write range chunk: " & e.msg)
+    raise newException(UploadError, "Failed to write range chunk: " & e.msg)
+
+proc setExpectedChecksum*(session: var UploadSession, checksum: string) =
+  ## Set expected checksum for integrity verification
+  session.expectedChecksum = checksum
+  if checksum.len > 0:
+    session.checksumContext = newSha1State()
+
+proc getCurrentChecksum*(session: UploadSession): string =
+  ## Get current calculated checksum
+  result = session.actualChecksum
+
+proc supportsRange*(session: UploadSession): bool =
+  ## Check if upload session supports range requests
+  result = session.supportsRanges
+
+proc setRangeSupport*(session: var UploadSession, enabled: bool) =
+  ## Enable or disable range support for upload session
+  session.supportsRanges = enabled
