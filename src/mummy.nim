@@ -5,7 +5,7 @@ when not defined(nimdoc):
 when not compileOption("threads"):
   {.error: "Using --threads:on is required by Mummy.".}
 
-import mummy/common, mummy/internal, std/atomics, std/base64,
+import mummy/common, mummy/internal, mummy/uploads, std/atomics, std/base64,
     std/cpuinfo, std/deques, std/hashes, std/nativesockets, std/os,
     std/parseutils, std/random, std/selectors, std/sets, crunchy,
     std/tables, std/times, webby/httpheaders, webby/queryparams, webby/urls,
@@ -25,7 +25,7 @@ when defined(linux):
 
 import std/locks
 
-export Port, common, httpheaders, queryparams
+export Port, common, httpheaders, queryparams, uploads
 
 const
   whitespace = {' ', '\t'}
@@ -201,6 +201,10 @@ type
     websocketClaimed: Table[WebSocket, bool]
     websocketQueues: Table[WebSocket, Deque[WebSocketUpdate]]
     websocketQueuesLock: Lock
+    # Upload support
+    uploadManager: UploadManager
+    uploadManagerLock: Lock
+    enableUploads: bool
 
   # Types moved above in main type section
 
@@ -725,6 +729,75 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   if queueWasEmpty:
     connection.server.trigger(connection.server.responseQueued)
+
+# Upload-related helper functions
+
+proc createUpload*(
+  request: Request,
+  filename: string,
+  maxSize: int64 = -1
+): string {.raises: [MummyError], gcsafe.} =
+  ## Create a new upload session and return upload ID
+  if not request.server.enableUploads:
+    raise newException(MummyError, "Uploads are not enabled on this server")
+  
+  withLock request.server.uploadManagerLock:
+    try:
+      let contentType = request.headers.getOrDefault("Content-Type", "application/octet-stream")
+      let totalSize = if maxSize > 0: maxSize else: -1
+      result = request.server.uploadManager.createUpload(filename, request.clientId, totalSize, contentType)
+    except UploadError as e:
+      raise newException(MummyError, "Failed to create upload: " & e.msg)
+
+proc getUpload*(
+  request: Request,
+  uploadId: string
+): ptr UploadSession {.gcsafe.} =
+  ## Get upload session by ID
+  if not request.server.enableUploads:
+    return nil
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.getUpload(uploadId)
+
+proc resumeUpload*(
+  request: Request,
+  uploadId: string
+): ptr UploadSession {.gcsafe.} =
+  ## Resume an existing upload session
+  if not request.server.enableUploads:
+    return nil
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.resumeUpload(uploadId, request.clientId)
+
+proc cancelUpload*(
+  request: Request,
+  uploadId: string
+) {.gcsafe.} =
+  ## Cancel an upload session
+  if not request.server.enableUploads:
+    return
+  
+  withLock request.server.uploadManagerLock:
+    request.server.uploadManager.removeUpload(uploadId)
+
+proc getUploadStats*(server: Server): tuple[total: int, active: int, completed: int, failed: int] {.gcsafe.} =
+  ## Get upload statistics
+  if not server.enableUploads:
+    result = (total: 0, active: 0, completed: 0, failed: 0)
+    return
+  
+  withLock server.uploadManagerLock:
+    result = server.uploadManager.getUploadStats()
+
+proc cleanupUploads*(server: Server) {.gcsafe.} =
+  ## Clean up expired uploads
+  if not server.enableUploads:
+    return
+  
+  withLock server.uploadManagerLock:
+    server.uploadManager.cleanupExpiredUploads()
 
 proc workerProc(server: Server) {.raises: [].} =
   # The worker threads run the task queue here
@@ -1455,6 +1528,8 @@ proc destroy(server: Server, joinThreads: bool) {.raises: [].} =
     deinitLock(server.responseQueueLock)
     deinitLock(server.sendQueueLock)
     deinitLock(server.websocketQueuesLock)
+    if server.enableUploads:
+      deinitLock(server.uploadManagerLock)
     try:
       server.responseQueued.close()
     except:
@@ -1806,7 +1881,9 @@ proc newServer*(
   maxMessageLen = 64 * 1024, # 64 KB
   executionModel: ExecutionModel = ThreadPool,
   taskpoolsHandler: TaskPoolsHandler = nil,
-  taskpoolsHandlerContext: pointer = nil
+  taskpoolsHandlerContext: pointer = nil,
+  uploadConfig: UploadConfig = defaultUploadConfig(),
+  enableUploads: bool = false
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
@@ -1915,6 +1992,12 @@ proc newServer*(
     initLock(result.responseQueueLock)
     initLock(result.sendQueueLock)
     initLock(result.websocketQueuesLock)
+    
+    # Initialize upload support
+    result.enableUploads = enableUploads
+    if enableUploads:
+      result.uploadManager = newUploadManager(uploadConfig)
+      initLock(result.uploadManagerLock)
 
     for i in 0 ..< result.workerThreads.len:
       createThread(result.workerThreads[i], workerProc, result)
