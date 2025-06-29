@@ -202,8 +202,8 @@ sequenceDiagram
     Server->>Client: 200 OK (Content-Type: text/event-stream)
 
     loop Every Second
-        Server->>Client: data: Update #1\n\n
-        Server->>Client: data: Update #2\n\n
+        Server->>Client: data: Update #1
+        Server->>Client: data: Update #2
         ...
     end
 
