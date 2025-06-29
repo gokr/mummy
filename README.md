@@ -166,55 +166,107 @@ I see no reason why Websockets should not work exceptionally well right out of t
 
 ## Large File Upload Support
 
-Mummy now includes comprehensive support for large file uploads with streaming capabilities:
+Mummy includes **production-ready large file upload capabilities** with comprehensive streaming, resumable uploads, and HTTP standards compliance:
 
-### Features
+### Core Features
 
-- **Streaming Uploads**: Files stream directly to disk, bypassing memory buffering for large uploads
-- **Resumable Uploads**: TUS protocol support for pause/resume functionality
-- **Atomic Operations**: Safe file handling with temporary files and atomic moves
-- **Progress Tracking**: Real-time upload progress monitoring
-- **Configurable Limits**: File size limits, concurrent upload limits, and timeout controls
-- **Thread-Safe**: Proper synchronization for multi-threaded environments
+- **🚀 TUS Protocol 1.0**: Full resumable upload support with pause/resume functionality
+- **📊 HTTP Range Requests**: RFC 7233 compliant partial content uploads with precise byte positioning
+- **💾 Memory-Efficient Streaming**: Files stream directly to disk, bypassing memory buffering
+- **🔒 Data Integrity**: SHA1 checksum verification for upload integrity validation
+- **⚡ Atomic Operations**: Safe file handling with temporary files and atomic completion moves
+- **📈 Progress Tracking**: Real-time upload progress monitoring with callback support
+- **🧵 Thread-Safe Operations**: Comprehensive synchronization for multi-threaded environments
+- **⏱️ Timeout & Rate Limiting**: Configurable upload timeouts and bandwidth controls
+
+### Advanced Capabilities
+
+**Resumable Uploads (TUS Protocol):**
+- Cross-session upload recovery (survive browser restarts)
+- Metadata handling and upload expiration
+- Checksum extensions for data integrity
+- Creation, append, status, and termination operations
+
+**HTTP Range Support:**
+- PATCH method for incremental uploads
+- Content-Range header processing
+- Multi-range upload capabilities
+- Byte-perfect positioning for partial uploads
+
+**Production Features:**
+- Upload session management with cleanup
+- Configurable file size and concurrency limits
+- Comprehensive error handling and status reporting
+- CORS support for web browser compatibility
 
 ### Example Usage
 
 ```nim
-import mummy, mummy/routers
+import mummy, mummy/routers, mummy/tus
 
-# Configure upload settings
+# Configure advanced upload settings
 var uploadConfig = defaultUploadConfig()
 uploadConfig.uploadDir = "uploads"
+uploadConfig.tempDir = "uploads/tmp"
 uploadConfig.maxFileSize = 1024 * 1024 * 1024  # 1GB
 uploadConfig.enableResumableUploads = true
+uploadConfig.enableRangeRequests = true
+uploadConfig.enableIntegrityCheck = true
 
-# Create server with upload support
+# Configure TUS protocol
+var tusConfig = defaultTUSConfig()
+tusConfig.maxSize = 1024 * 1024 * 1024  # 1GB
+tusConfig.enableChecksum = true
+
+# Create server with full upload support
 let server = newServer(
-  handler,
+  router,
   enableUploads = true,
-  uploadConfig = uploadConfig
+  uploadConfig = uploadConfig,
+  tusConfig = tusConfig
 )
 
-proc uploadHandler(request: Request) =
-  # Create streaming upload session
-  let uploadId = request.createUpload("large_file.bin")
-  let upload = request.getUpload(uploadId)
-  
-  # Set up progress tracking
-  upload.onProgress = proc(bytes, total: int64) =
-    echo fmt"Progress: {bytes}/{total} bytes"
-  
-  # Upload streams automatically to disk
-  upload.stream()
+# TUS resumable upload handler
+proc tusHandler(request: Request) =
+  let uploadId = extractUploadIdFromPath(request.path, "/tus/")
+  let tusResponse = request.handleTUSRequest(uploadId)
+  request.respondTUS(tusResponse)
+
+# HTTP Range upload handler
+proc rangeUploadHandler(request: Request) =
+  let uploadId = request.pathParams["uploadId"]
+  let contentRange = request.headers["Content-Range"]
+  request.handleRangeRequest(uploadId, contentRange)
+
+# Setup routes
+var router: Router
+router.post("/tus/", tusHandler)           # Create uploads
+router.patch("/tus/*uploadId", tusHandler) # Append data
+router.head("/tus/*uploadId", tusHandler)  # Get status
+router.patch("/range/*uploadId", rangeUploadHandler)
 ```
 
-### Upload Modes
+### Upload Protocols
 
-- **Traditional**: Small files buffered in memory (existing behavior)
-- **Streaming**: Large files stream directly to disk
-- **Resumable**: TUS protocol for interrupted upload recovery
+- **🔄 TUS Resumable**: Full TUS 1.0 protocol for pause/resume uploads across sessions
+- **📊 HTTP Range**: RFC 7233 Range requests for partial content uploads
+- **💾 Streaming**: Direct-to-disk streaming for memory-efficient large file handling
+- **🔒 Secure**: Checksum verification and atomic file operations
 
-See `examples/upload_demo.nim` for a complete demonstration.
+### Complete Demo
+
+The `examples/complete_upload_server.nim` provides a comprehensive demonstration with:
+- Interactive web interface with JavaScript TUS client
+- Multiple upload modes (TUS, Range, Checksum verification)
+- Real-time progress tracking and upload statistics
+- Pause/resume controls and upload management
+
+Run the demo:
+```bash
+nim c --threads:on --mm:orc examples/complete_upload_server.nim
+./examples/complete_upload_server
+# Open http://localhost:8080 for interactive demo
+```
 
 ## What is Mummy not great for?
 
