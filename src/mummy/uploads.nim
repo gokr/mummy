@@ -238,7 +238,7 @@ proc completeUpload*(session: var UploadSession) =
     
     # Verify checksum if expected
     if session.expectedChecksum.len > 0:
-      session.actualChecksum = $session.checksumContext.finalize
+      session.actualChecksum = $SecureHash(session.checksumContext.finalize)
       if session.actualChecksum.toLowerAscii() != session.expectedChecksum.toLowerAscii():
         session.status = UploadFailed
         let errMsg = fmt"Checksum mismatch: expected {session.expectedChecksum}, got {session.actualChecksum}"

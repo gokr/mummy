@@ -1,5 +1,27 @@
 ## HTTP Range request upload example
 ## Demonstrates RFC 7233 compliant partial content uploads using PATCH method
+##
+## 📋 STANDARDS COMPLIANT: RFC 7233 HTTP Range Requests ✅
+##
+## This example implements the official HTTP Range Request standard:
+## - RFC 7233: Hypertext Transfer Protocol (HTTP/1.1): Range Requests
+## - Uses standard Content-Range headers
+## - PATCH method with precise byte positioning
+## - Compatible with HTTP caches and proxies
+## - Widely supported by browsers and servers
+##
+## Use this for:
+## - Standards-compliant resumable uploads
+## - Integration with existing HTTP infrastructure
+## - Applications requiring HTTP Range Request compatibility
+## - Browser-based chunked uploads with pause/resume
+##
+## Features:
+## - 64KB chunks for efficient transfer
+## - Precise byte-range positioning
+## - Pause/resume functionality
+## - Progress tracking
+## - Compatible with HTTP/1.1 standard
 
 import ../src/mummy, ../src/mummy/routers, ../src/mummy/ranges
 import std/[strformat, json, os, strutils, times]

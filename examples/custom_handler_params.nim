@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 ## This example shows how to create custom handlers that take more parameters
 ## than just the Request object.

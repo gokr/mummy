@@ -1,7 +1,26 @@
-## Upload demonstration for Mummy
+## Upload demonstration for Mummy  
 ## Shows the planned file upload API and infrastructure
+##
+## ⚠️  DEMONSTRATION ONLY: Placeholder/prototype code (non-functional)
+##
+## This is a demonstration/planning example showing conceptual upload APIs.
+## It is NOT a working implementation and is kept for reference purposes.
+##
+## For working upload examples, use:
+## ✅ examples/complete_upload_server.nim - Full TUS + Range + Multipart
+## ✅ examples/tus_upload.nim - TUS Protocol 1.0 (industry standard)
+## ✅ examples/range_upload.nim - RFC 7233 HTTP Range Requests
+## ✅ examples/checksum_upload.nim - TUS with integrity verification
+## ✅ examples/basic_upload.nim - RFC 7578 Multipart form uploads
+##
+## This example is kept for:
+## - Historical reference
+## - API design documentation
+## - Development planning
+##
+## ⚠️  This code is NOT functional - use the working examples above instead
 
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 import std/[strformat, os, strutils]
 
 proc uploadHandler(request: Request) =

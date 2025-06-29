@@ -1,7 +1,29 @@
 ## Simple file upload example for Mummy
 ## Demonstrates basic streaming upload functionality
+##
+## ⚠️  EDUCATIONAL EXAMPLE: Custom streaming API (not standards-compliant)
+##
+## This example shows Mummy's upload infrastructure capabilities but
+## does NOT implement standard protocols. It's for learning purposes.
+##
+## For production applications, use standards-compliant examples:
+## ✅ examples/tus_upload.nim - TUS Protocol 1.0 (industry standard)
+## ✅ examples/range_upload.nim - RFC 7233 HTTP Range Requests  
+## ✅ examples/basic_upload.nim - RFC 7578 Multipart form uploads
+##
+## This example demonstrates:
+## - Mummy's streaming upload capabilities
+## - Custom upload session management
+## - Educational upload workflow
+##
+## Use this for:
+## - Understanding Mummy's upload infrastructure
+## - Learning streaming upload concepts
+## - Prototyping custom upload solutions
+##
+## ⚠️  Not recommended for production use - use standards-compliant examples instead
 
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 import std/[strformat, os, strutils]
 
 proc uploadHandler(request: Request) =

@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 ## This example shows how to access client request headers.
 

@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 proc firstHandler(request: Request) =
   # Responds with a 302 redirect

@@ -1,7 +1,32 @@
 ## Basic file upload example for Mummy
 ## Simple demonstration without streaming - just basic file saving
+##
+## 📋 STANDARDS COMPLIANT: Multipart Form Data (RFC 7578) ✅
+##
+## This example implements the standard HTTP multipart upload:
+## - RFC 7578: Returning Values from Forms: multipart/form-data
+## - Standard HTML form file uploads
+## - Compatible with all browsers and HTTP clients
+## - Simple, traditional approach
+##
+## Use this for:
+## - Basic file upload functionality
+## - HTML form-based uploads
+## - Simple applications without chunking requirements
+## - Learning basic upload handling
+## - Small to medium file uploads (under server limits)
+##
+## Features:
+## - Standard HTML form compatibility
+## - Direct file saving
+## - Simple error handling
+## - Minimal complexity
+##
+## For large files or resumable uploads, see:
+## - examples/tus_upload.nim (TUS protocol)
+## - examples/range_upload.nim (HTTP Range requests)
 
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 import std/[strformat, os, strutils]
 
 proc uploadHandler(request: Request) =

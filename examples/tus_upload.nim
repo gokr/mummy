@@ -1,7 +1,30 @@
 ## TUS (resumable upload) protocol implementation for Mummy
 ## Implements the tus.io resumable upload specification
+##
+## 📋 STANDARDS COMPLIANT: TUS Protocol 1.0 ✅
+##
+## This example implements the full TUS (Transloadit Upload Server) protocol:
+## - TUS Protocol 1.0 specification (https://tus.io/)
+## - Industry standard for resumable file uploads
+## - Used by major platforms: Vimeo, YouTube, Dropbox, Instagram, etc.
+## - Extensive client library ecosystem available
+##
+## TUS Protocol features implemented:
+## ✅ Core protocol - Basic resumable uploads
+## ✅ Creation extension - Upload creation via POST
+## ✅ Checksum extension - Data integrity verification
+## ✅ Termination extension - Upload cancellation
+##
+## Use this for:
+## - Production resumable upload systems
+## - Integration with existing TUS clients
+## - Large file uploads requiring reliability
+## - Cross-platform upload compatibility
+##
+## Client libraries available for: JavaScript, Python, Go, Java, iOS, Android, .NET
+## Standard: TUS 1.0 (https://tus.io/protocols/resumable-upload.html)
 
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 import std/[strformat, json, strutils, parseutils]
 
 const

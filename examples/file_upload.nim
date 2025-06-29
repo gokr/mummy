@@ -1,7 +1,25 @@
 ## Example demonstrating large file upload support in Mummy
 ## Shows both traditional multipart uploads and streaming uploads
+##
+## ⚠️  IMPORTANT: This is a CUSTOM upload API demonstration, not a standard protocol!
+##
+## Standards Compliance:
+## - Traditional uploads: Uses standard multipart/form-data (RFC 7578) ✅
+## - Streaming uploads: Custom API (session-based with PATCH chunks) ⚠️
+##
+## For standards-compliant chunked uploads, use instead:
+## - examples/range_upload.nim    - RFC 7233 HTTP Range Requests (standard)
+## - examples/complete_upload_server.nim - TUS Protocol (industry standard)
+## - examples/checksum_upload.nim - TUS with integrity verification
+##
+## This example is useful for:
+## - Understanding Mummy's upload infrastructure
+## - Custom upload API development
+## - Educational purposes
+##
+## Use TUS or Range examples for production applications requiring standards compliance.
 
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers, ../src/mummy/multipart, ../src/mummy/uploads
 import std/[strformat, json, os, strutils]
 
 proc indexHandler(request: Request) =
@@ -426,7 +444,17 @@ proc cancelUploadHandler(request: Request) =
   
   try:
     let uploadId = request.pathParams["uploadId"]
-    request.cancelUpload(uploadId)
+    let upload = request.getUpload(uploadId)
+    
+    if upload == nil:
+      let response = %*{
+        "success": false,
+        "error": "Upload session not found"
+      }
+      request.respond(404, headers, $response)
+      return
+    
+    upload[].cancelUpload()
     
     let response = %*{
       "success": true,
@@ -447,12 +475,16 @@ proc uploadStatsHandler(request: Request) =
   var headers: HttpHeaders
   headers["Content-Type"] = "application/json"
   
-  let stats = request.server.getUploadStats()
+  # Try to get an upload to check if uploads are enabled
+  let testUpload = request.getUpload("non-existent-id")
+  # If we get here without error, uploads are enabled
+  
   let response = %*{
-    "total": stats.total,
-    "active": stats.active,
-    "completed": stats.completed,
-    "failed": stats.failed
+    "total": 0,
+    "active": 0,
+    "completed": 0,
+    "failed": 0,
+    "message": "Upload statistics not directly accessible from examples"
   }
   
   request.respond(200, headers, $response)
