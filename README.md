@@ -241,9 +241,9 @@ proc rangeUploadHandler(request: Request) =
 # Setup routes
 var router: Router
 router.post("/tus/", tusHandler)           # Create uploads
-router.patch("/tus/*uploadId", tusHandler) # Append data
-router.head("/tus/*uploadId", tusHandler)  # Get status
-router.patch("/range/*uploadId", rangeUploadHandler)
+router.patch("/tus/@uploadId", tusHandler) # Append data
+router.head("/tus/@uploadId", tusHandler)  # Get status
+router.patch("/range/@uploadId", rangeUploadHandler)
 ```
 
 ### Upload Protocols

@@ -494,11 +494,11 @@ var router: Router
 router.get("/", indexHandler)
 router.post("/upload", traditionalUploadHandler)
 router.post("/upload/create", createUploadHandler)
-router.patch("/upload/chunk/*uploadId", uploadChunkHandler)
-router.post("/upload/complete/*uploadId", completeUploadHandler)
-router.head("/upload/status/*uploadId", uploadStatusHandler)
-router.get("/upload/status/*uploadId", uploadStatusHandler)
-router.delete("/upload/cancel/*uploadId", cancelUploadHandler)
+router.patch("/upload/chunk/@uploadId", uploadChunkHandler)
+router.post("/upload/complete/@uploadId", completeUploadHandler)
+router.head("/upload/status/@uploadId", uploadStatusHandler)
+router.get("/upload/status/@uploadId", uploadStatusHandler)
+router.delete("/upload/cancel/@uploadId", cancelUploadHandler)
 router.get("/upload/stats", uploadStatsHandler)
 
 # Configure upload settings

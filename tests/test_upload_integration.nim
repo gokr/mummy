@@ -124,15 +124,15 @@ proc serverProc() {.thread, gcsafe.} =
   router.get("/health", healthHandler)
   router.post("/simple", simpleUploadHandler)
   router.post("/range/create", createRangeUpload)
-  router.patch("/range/upload/*uploadId", rangeUploadHandler)
+  router.patch("/range/upload/@uploadId", rangeUploadHandler)
   
   # TUS endpoints
   router.options("/tus/", tusHandler)
-  router.options("/tus/*uploadId", tusHandler)
+  router.options("/tus/@uploadId", tusHandler)
   router.post("/tus/", tusHandler)
-  router.head("/tus/*uploadId", tusHandler)
-  router.patch("/tus/*uploadId", tusHandler)
-  router.delete("/tus/*uploadId", tusHandler)
+  router.head("/tus/@uploadId", tusHandler)
+  router.patch("/tus/@uploadId", tusHandler)
+  router.delete("/tus/@uploadId", tusHandler)
   
   # Configure uploads
   var uploadConfig = defaultUploadConfig()
