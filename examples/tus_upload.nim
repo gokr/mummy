@@ -25,7 +25,7 @@
 ## Standard: TUS 1.0 (https://tus.io/protocols/resumable-upload.html)
 
 import ../src/mummy, ../src/mummy/routers
-import std/[strformat, json, strutils, parseutils]
+import std/[strformat, json, strutils, parseutils, base64]
 
 const
   TUS_VERSION = "1.0.0"
@@ -54,7 +54,11 @@ proc createUploadEndpoint(request: Request) =
   
   try:
     # Extract upload length from headers
-    let uploadLengthHeader = request.headers.getOrDefault("Upload-Length", "")
+    var uploadLengthHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-length":
+        uploadLengthHeader = value
+        break
     if uploadLengthHeader.len == 0:
       request.respond(400, headers, "Upload-Length header required")
       return
@@ -66,7 +70,11 @@ proc createUploadEndpoint(request: Request) =
     
     # Extract metadata
     var filename = "upload.bin"
-    let metadataHeader = request.headers.getOrDefault("Upload-Metadata", "")
+    var metadataHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-metadata":
+        metadataHeader = value
+        break
     if metadataHeader.len > 0:
       # Parse base64-encoded metadata (simplified)
       let pairs = metadataHeader.split(",")
@@ -126,7 +134,11 @@ proc patchUploadEndpoint(request: Request) =
       return
     
     # Check Upload-Offset header
-    let offsetHeader = request.headers.getOrDefault("Upload-Offset", "")
+    var offsetHeader = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "upload-offset":
+        offsetHeader = value
+        break
     if offsetHeader.len == 0:
       request.respond(400, headers, "Upload-Offset header required")
       return
@@ -137,7 +149,11 @@ proc patchUploadEndpoint(request: Request) =
       return
     
     # Check Content-Type
-    let contentType = request.headers.getOrDefault("Content-Type", "")
+    var contentType = ""
+    for (key, value) in request.headers:
+      if key.toLowerAscii() == "content-type":
+        contentType = value
+        break
     if contentType != "application/offset+octet-stream":
       request.respond(400, headers, "Content-Type must be application/offset+octet-stream")
       return
@@ -170,7 +186,9 @@ proc deleteUploadEndpoint(request: Request) =
   
   try:
     let uploadId = request.pathParams["uploadId"]
-    request.cancelUpload(uploadId)
+    let upload = request.getUpload(uploadId)
+    if upload != nil:
+      upload[].cancelUpload()
     
     request.respond(204, headers)
     
