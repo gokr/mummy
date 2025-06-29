@@ -30,6 +30,7 @@ import std/[strformat, json, strutils, parseutils, base64]
 const
   TUS_VERSION = "1.0.0"
   TUS_MAX_SIZE = 1024 * 1024 * 1024  # 1GB
+  TUS_MAX_CHUNK_SIZE = 200 * 1024 * 1024  # 200MB chunk limit
 
 proc addTUSHeaders(headers: var HttpHeaders) =
   ## Add common TUS headers to response
@@ -173,9 +174,14 @@ proc patchUploadEndpoint(request: Request) =
       echo "Opening file for writing"
       upload[].openForWriting()
     
-    # Write the chunk
+    # Write the chunk with size validation
     if request.body.len > 0:
       echo fmt"Writing chunk of size: {request.body.len} bytes"
+      if request.body.len > TUS_MAX_CHUNK_SIZE:
+        echo "Chunk size exceeds server limit"
+        request.respond(413, headers, "Chunk size exceeds server limit")
+        return
+      
       upload[].writeChunk(request.body.toOpenArrayByte(0, request.body.len - 1))
       echo fmt"New bytes received: {upload[].bytesReceived}"
     
@@ -294,6 +300,7 @@ proc indexHandler(request: Request) =
             const options = {
                 endpoint: '/files/',
                 retryDelays: [0, 3000, 5000, 10000, 20000],
+                chunkSize: 5 * 1024 * 1024,  // 5MB chunks
                 metadata: {
                     filename: file.name,
                     filetype: file.type
@@ -383,11 +390,11 @@ proc indexHandler(request: Request) =
 var router: Router
 router.get("/", indexHandler)
 router.options("/files/", optionsHandler)
-router.options("/files/*uploadId", optionsHandler)
+router.options("/files/@uploadId", optionsHandler)
 router.post("/files/", createUploadEndpoint)
-router.head("/files/*uploadId", headUploadEndpoint)
-router.patch("/files/*uploadId", patchUploadEndpoint)
-router.delete("/files/*uploadId", deleteUploadEndpoint)
+router.head("/files/@uploadId", headUploadEndpoint)
+router.patch("/files/@uploadId", patchUploadEndpoint)
+router.delete("/files/@uploadId", deleteUploadEndpoint)
 
 # Configure for TUS uploads
 var uploadConfig = defaultUploadConfig()
@@ -402,7 +409,7 @@ let server = newServer(
   router,
   enableUploads = true,
   uploadConfig = uploadConfig,
-  maxBodyLen = 100 * 1024 * 1024  # 100MB chunks
+  maxBodyLen = TUS_MAX_CHUNK_SIZE
 )
 
 echo "TUS Resumable Upload Server"
