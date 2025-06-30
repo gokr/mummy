@@ -98,11 +98,11 @@ proc handleTreasure(req: Request) =
   let treasure = req.pathParams["treasure"]
   req.respond(200, body = "You found the " & treasure & "!")
 
-var router = newRouter()
-router.add(HttpGET, "/", handleHome)
-router.add(HttpGET, "/treasure/:treasure", handleTreasure)
+var router: Router
+router.get("/", handleHome)
+router.get("/treasure/:treasure", handleTreasure)
 
-var server = newServer(router.handler)
+var server = newServer(router)
 echo "Server starting on http://localhost:8080"
 server.serve(Port(8080))
 
@@ -167,7 +167,7 @@ sequenceDiagram
 For one-way communication from the server to the client, Server-Sent Events (SSE) are a fantastic choice. Here's how to stream updates from your Mummy server:
 
 ```nim
-import mummy, mummy/routers, std/times
+import mummy, mummy/routers, std/os
 
 proc sseHandler(req: Request) =
   var sse = req.respondSSE()
@@ -183,10 +183,10 @@ proc sseHandler(req: Request) =
 
   sse.close()
 
-var router = newRouter()
-router.add(HttpGET, "/stream", sseHandler)
+var router: Router
+router.get("/stream", sseHandler)
 
-var server = newServer(router.handler)
+var server = newServer(router)
 echo "Server starting on http://localhost:8080"
 server.serve(Port(8080))
 ```
