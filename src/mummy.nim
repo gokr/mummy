@@ -5,13 +5,14 @@ when not defined(nimdoc):
 when not compileOption("threads"):
   {.error: "Using --threads:on is required by Mummy.".}
 
-import mummy/common, mummy/internal, std/atomics, std/base64,
-    std/cpuinfo, std/deques, std/hashes, std/nativesockets, std/os,
-    std/parseutils, std/random, std/selectors, std/sets, crunchy,
-    std/tables, std/times, webby/httpheaders, webby/queryparams, webby/urls,
-    zippy, std/options
+import mummy/common, mummy/internal, mummy/uploads, mummy/tus, mummy/ranges,
+    std/atomics, std/base64, std/cpuinfo, std/deques, std/hashes, 
+    std/nativesockets, std/os, std/parseutils, std/random, std/selectors, 
+    std/sets, crunchy, std/tables, std/times, webby/httpheaders, 
+    webby/queryparams, webby/urls, zippy, std/options, taskpools
 
-from std/strutils import find, cmpIgnoreCase, toLowerAscii
+from std/strutils import find, cmpIgnoreCase, toLowerAscii, toUpperAscii
+import std/strformat
 
 when defined(linux):
   when defined(nimdoc):
@@ -25,7 +26,7 @@ when defined(linux):
 
 import std/locks
 
-export Port, common, httpheaders, queryparams
+export Port, common, httpheaders, queryparams, uploads, tus, ranges
 
 const
   whitespace = {' ', '\t'}
@@ -38,6 +39,56 @@ let
   http11 = "HTTP/1.1"
 
 type
+  # Simple types first
+  WebSocketEvent* = enum
+    OpenEvent, MessageEvent, ErrorEvent, CloseEvent
+
+  MessageKind* = enum
+    TextMessage, BinaryMessage, Ping, Pong
+
+  ExecutionModel* = enum
+    ## Defines how the server handles request processing
+    ThreadPool,  ## Traditional fixed thread pool (default, backward compatible)
+    TaskPools    ## Dynamic taskpools-based processing
+
+  Message* = object
+    kind*: MessageKind
+    data*: string
+
+  IsolatableRequestData* = object
+    ## Taskpools-compatible request data containing only isolatable fields
+    httpVersion*: HttpVersion
+    httpMethod*: string
+    uri*: string
+    path*: string
+    queryParams*: QueryParams
+    pathParams*: PathParams
+    headers*: HttpHeaders
+    body*: string
+    remoteAddress*: string
+    clientId*: uint64  # For response correlation
+
+  ResponseData* = object
+    ## Response data returned from taskpools handlers
+    statusCode*: int
+    headers*: HttpHeaders
+    body*: string
+    closeConnection*: bool
+
+  TaskPoolsHandler* = proc(data: IsolatableRequestData, ctx: pointer): ResponseData {.gcsafe.}
+
+  # Forward declarations and interdependent types
+  Server* = ptr ServerObj
+  Request* = ptr RequestObj
+
+  RequestHandler* = proc(request: Request) {.gcsafe.}
+
+  WebSocketHandler* = proc(
+    websocket: WebSocket,
+    event: WebSocketEvent,
+    message: Message
+  ) {.gcsafe.}
+
   RequestObj* = object
     httpVersion*: HttpVersion ## HTTP version from the request line.
     httpMethod*: string ## HTTP method from the request line.
@@ -53,12 +104,13 @@ type
     clientId: uint64
     responded: bool
 
-  Request* = ptr RequestObj
-
   WebSocket* = object
     server: Server
     clientSocket: SocketHandle
     clientId: uint64
+
+  WorkerTaskKind = enum
+    ThreadPoolTask, TaskPoolsTask, WebSocketTask
 
   Message* = object
     kind*: MessageKind
@@ -119,8 +171,14 @@ type
   Server* = ptr ServerObj
 
   WorkerTask = object
-    request: Request
-    websocket: WebSocket
+    case kind: WorkerTaskKind:
+    of ThreadPoolTask:
+      request: Request
+    of TaskPoolsTask:
+      isolatableData: IsolatableRequestData
+      clientSocket: SocketHandle
+    of WebSocketTask:
+      websocket: WebSocket
 
   DataEntryKind = enum
     ServerSocketEntry, ClientSocketEntry, EventEntry
@@ -174,6 +232,93 @@ type
     event: WebSocketEvent
     message: Message
 
+  ServerObj {.acyclic.} = object
+    handler: RequestHandler
+    taskpoolsHandler: TaskPoolsHandler
+    websocketHandler: WebSocketHandler
+    logHandler: LogHandler
+    taskpoolsHandlerContext: pointer  # Context for taskpools handler
+    maxHeadersLen, maxBodyLen, maxMessageLen: int
+    rand: Rand
+    executionModel: ExecutionModel
+    workerThreads: seq[Thread[Server]]
+    taskpool: Taskpool
+    serving: Atomic[bool]
+    destroyCalled: bool
+    socket: SocketHandle
+    selector: Selector[DataEntry]
+    responseQueued, sendQueued, shutdown: SelectEvent
+    clientSockets: HashSet[SocketHandle]
+    taskQueueLock: Lock
+    taskQueueCond: Cond
+    taskQueue: Deque[WorkerTask]
+    responseQueue: Deque[OutgoingBuffer]
+    responseQueueLock: Lock
+    sendQueue: Deque[OutgoingBuffer]
+    sendQueueLock: Lock
+    websocketClaimed: Table[WebSocket, bool]
+    websocketQueues: Table[WebSocket, Deque[WebSocketUpdate]]
+    websocketQueuesLock: Lock
+    # Upload support
+    uploadManager: UploadManager
+    uploadManagerLock: Lock
+    enableUploads: bool
+    tusConfig: TUSConfig
+
+  # Types moved above in main type section
+
+  SSEConnection* = object
+    ## Represents an active Server-Sent Events connection
+    server*: Server
+    clientSocket*: SocketHandle
+    clientId*: uint64
+    active*: bool
+
+  SSEEvent* = object
+    ## Represents a Server-Sent Events message
+    event*: Option[string]  ## Optional event type
+    data*: string          ## The data payload (required)
+    id*: Option[string]    ## Optional event ID for client-side event tracking
+    retry*: Option[int]    ## Optional retry timeout in milliseconds
+
+proc formatSSEEvent*(event: SSEEvent): string {.raises: [], gcsafe.} =
+  ## Format an SSE event according to the Server-Sent Events specification
+  ## https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events
+  
+  result = ""
+  
+  # Add event type if specified
+  if event.event.isSome:
+    result.add("event: " & event.event.get() & "\n")
+  
+  # Add event ID if specified
+  if event.id.isSome:
+    result.add("id: " & event.id.get() & "\n")
+  
+  # Add retry timeout if specified
+  if event.retry.isSome:
+    result.add("retry: " & $event.retry.get() & "\n")
+  
+  # Add data field(s) - handle multiline data properly
+  if event.data.len > 0:
+    # Split multiline data and prefix each line with "data: "
+    var pos = 0
+    while pos < event.data.len:
+      result.add("data: ")
+      let lineStart = pos
+      while pos < event.data.len and event.data[pos] != '\n':
+        inc pos
+      result.add(event.data[lineStart ..< pos])
+      result.add("\n")
+      if pos < event.data.len: # Skip the \n
+        inc pos
+  else:
+    # Empty data field
+    result.add("data: \n")
+  
+  # End event with empty line
+  result.add("\n")
+
 proc `$`*(request: Request): string {.gcsafe.} =
   result = request.httpMethod & " " & request.uri & " "
   {.gcsafe.}:
@@ -187,6 +332,26 @@ proc `$`*(request: Request): string {.gcsafe.} =
 proc `$`*(websocket: WebSocket): string =
   "WebSocket " & $cast[uint](hash(websocket))
 
+proc toIsolatableRequestData*(request: Request): IsolatableRequestData {.gcsafe.} =
+  ## Convert a Request object to IsolatableRequestData for taskpools
+  result.httpVersion = request.httpVersion
+  result.httpMethod = request.httpMethod
+  result.uri = request.uri
+  result.path = request.path
+  result.queryParams = request.queryParams
+  result.pathParams = request.pathParams
+  result.headers = request.headers
+  result.body = request.body
+  result.remoteAddress = request.remoteAddress
+  result.clientId = request.clientId
+
+proc createResponseData*(statusCode: int, headers: HttpHeaders, body: string, closeConnection: bool = false): ResponseData {.gcsafe.} =
+  ## Create a ResponseData object for taskpools handlers
+  result.statusCode = statusCode
+  result.headers = headers
+  result.body = body
+  result.closeConnection = closeConnection
+
 proc log(server: Server, level: LogLevel, args: varargs[string]) =
   if server.logHandler == nil:
     return
@@ -194,6 +359,80 @@ proc log(server: Server, level: LogLevel, args: varargs[string]) =
     server.logHandler(level, args)
   except:
     discard # ???
+
+proc trigger(
+  server: Server,
+  event: SelectEvent
+) {.raises: [].} =
+  try:
+    event.trigger()
+  except:
+    let err = osLastError()
+    server.log(
+      ErrorLevel,
+      "Error triggering event ", $err, " ", osErrorMsg(err)
+    )
+
+proc responseDataToOutgoingBuffer*(responseData: ResponseData, clientSocket: SocketHandle, clientId: uint64): OutgoingBuffer {.gcsafe.} =
+  ## Convert ResponseData to OutgoingBuffer for sending
+  result = OutgoingBuffer()
+  result.clientSocket = clientSocket
+  result.clientId = clientId
+  result.closeConnection = responseData.closeConnection
+  
+  # Encode HTTP response
+  var response = "HTTP/1.1 " & $responseData.statusCode
+  case responseData.statusCode:
+  of 200: response &= " OK"
+  of 404: response &= " Not Found"
+  of 500: response &= " Internal Server Error"
+  else: response &= " Unknown"
+  
+  response &= "\r\n"
+  
+  # Add headers
+  for (key, value) in responseData.headers:
+    response &= key & ": " & value & "\r\n"
+  
+  # Add Content-Length if not present
+  if "Content-Length" notin responseData.headers:
+    response &= "Content-Length: " & $responseData.body.len & "\r\n"
+  
+  response &= "\r\n" & responseData.body
+  
+  result.buffer1 = response
+
+proc executeTaskpoolsRequest*(data: IsolatableRequestData, handler: TaskPoolsHandler, ctx: pointer): ResponseData {.gcsafe.} =
+  ## Execute a taskpools request with proper error handling
+  try:
+    result = handler(data, ctx)
+  except:
+    let e = getCurrentException()
+    var headers: HttpHeaders
+    headers["Content-Type"] = "text/plain"
+    result = createResponseData(500, headers, "Handler Exception: " & e.msg)
+
+proc processTaskpoolsRequest(
+  data: IsolatableRequestData,
+  clientSocket: SocketHandle,
+  server: Server
+) {.gcsafe.} =
+  ## Process a taskpools request by executing the handler and queueing the response
+  let responseData = executeTaskpoolsRequest(data, server.taskpoolsHandler, server.taskpoolsHandlerContext)
+  
+  # Queue the response for sending - create OutgoingBuffer in main thread context
+  var queueWasEmpty: bool
+  withLock server.responseQueueLock:
+    queueWasEmpty = server.responseQueue.len == 0
+    let outgoingBuffer = responseDataToOutgoingBuffer(
+      responseData,
+      clientSocket,
+      data.clientId
+    )
+    server.responseQueue.addLast(outgoingBuffer)
+  
+  if queueWasEmpty:
+    server.trigger(server.responseQueued)
 
 proc headerContainsToken(headers: var HttpHeaders, key, token: string): bool =
   # If a header looks like `Accept-Encoding: gzip,deflate` then we may want to
@@ -242,19 +481,6 @@ proc updateHandle2(
     selector.updateHandle(socket, events)
   except ValueError: # Why ValueError?
     raise newException(IOSelectorsException, getCurrentExceptionMsg())
-
-proc trigger(
-  server: Server,
-  event: SelectEvent
-) {.raises: [].} =
-  try:
-    event.trigger()
-  except:
-    let err = osLastError()
-    server.log(
-      ErrorLevel,
-      "Error triggering event ", $err, " ", osErrorMsg(err)
-    )
 
 proc send*(
   websocket: WebSocket,
@@ -571,12 +797,12 @@ proc send*(
   
   # Queue the event for sending
   var queueWasEmpty: bool
-  withLock server.responseQueueLock:
-    queueWasEmpty = server.responseQueue.len == 0
-    server.responseQueue.addLast(move buffer)
+  withLock connection.server.responseQueueLock:
+    queueWasEmpty = connection.server.responseQueue.len == 0
+    connection.server.responseQueue.addLast(move buffer)
   
   if queueWasEmpty:
-    server.trigger(server.responseQueued)
+    connection.server.trigger(connection.server.responseQueued)
 
 proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   ## Close the SSE connection.
@@ -594,12 +820,16 @@ proc close*(connection: var SSEConnection) {.raises: [], gcsafe.} =
   
   # Queue connection closure
   var queueWasEmpty: bool
-  withLock server.responseQueueLock:
-    queueWasEmpty = server.responseQueue.len == 0
-    server.responseQueue.addLast(move buffer)
+  withLock connection.server.responseQueueLock:
+    queueWasEmpty = connection.server.responseQueue.len == 0
+    connection.server.responseQueue.addLast(move buffer)
   
   if queueWasEmpty:
-    server.trigger(server.responseQueued)
+    connection.server.trigger(connection.server.responseQueued)
+
+# Upload functions previously here - moved to end of file
+
+# Upload/TUS functions are defined at the end of the file to avoid conflicts
 
 proc close*(connection: SSEConnection) {.raises: [], gcsafe.} =
   var conn = connection
@@ -610,7 +840,8 @@ proc workerProc(server: Server) {.raises: [].} =
   let server = server
 
   proc runTask(task: WorkerTask) =
-    if task.request != nil:
+    case task.kind:
+    of ThreadPoolTask:
       try:
         server.handler(task.request)
       except:
@@ -623,7 +854,15 @@ proc workerProc(server: Server) {.raises: [].} =
           task.request.respond(500)
       `=destroy`(task.request[])
       deallocShared(task.request)
-    else: # WebSocket
+    of TaskPoolsTask:
+      # This should never be reached because TaskPools tasks are processed by the taskpool
+      # Log to stderr and do nothing
+      try:
+        var msg = "Critical: TaskPoolsTask processed by worker thread. This should not happen."
+        discard writeBuffer(stderr, msg.cstring, msg.len)
+      except:
+        discard # Ignore errors when writing to stderr
+    of WebSocketTask:
       withLock server.websocketQueuesLock:
         if server.websocketClaimed.getOrDefault(task.websocket, true):
           # If this websocket has been claimed or if it is not present in
@@ -681,7 +920,15 @@ proc workerProc(server: Server) {.raises: [].} =
     let task = server.taskQueue.popFirst()
     release(server.taskQueueLock)
 
-    runTask(task)
+    try:
+      runTask(task)
+    except:
+      try:
+        let e = getCurrentException()
+        var msg = "Worker thread exception: " & e.msg & "\n" & e.getStackTrace()
+        discard writeBuffer(stderr, msg.cstring, msg.len)
+      except:
+        discard # Ignore errors when writing to stderr
 
     when defined(mummyCheck22398):
       # https://github.com/nim-lang/Nim/issues/22398
@@ -690,9 +937,27 @@ proc workerProc(server: Server) {.raises: [].} =
         loggedExceptionLeak = true
 
 proc postTask(server: Server, task: WorkerTask) {.raises: [].} =
-  withLock server.taskQueueLock:
-    server.taskQueue.addLast(task)
-  signal(server.taskQueueCond)
+  case server.executionModel:
+  of ThreadPool:
+    # Traditional thread pool: add to queue for worker threads
+    withLock server.taskQueueLock:
+      server.taskQueue.addLast(task)
+    signal(server.taskQueueCond)
+  of TaskPools:
+    # TaskPools execution model
+    case task.kind:
+    of TaskPoolsTask:
+      # Spawn the task on the taskpool
+      spawn server.taskpool, processTaskpoolsRequest(
+        task.isolatableData,
+        task.clientSocket,
+        server
+      )
+    of ThreadPoolTask, WebSocketTask:
+      # Fall back to thread pool for ThreadPoolTask and WebSocketTask
+      withLock server.taskQueueLock:
+        server.taskQueue.addLast(task)
+      signal(server.taskQueueCond)
 
 proc postWebSocketUpdate(
   websocket: WebSocket,
@@ -716,7 +981,7 @@ proc postWebSocketUpdate(
       discard # Not possible
 
   if needsTask:
-    websocket.server.postTask(WorkerTask(websocket: websocket))
+    websocket.server.postTask(WorkerTask(kind: WebSocketTask, websocket: websocket))
 
 proc sendCloseFrame(
   server: Server,
@@ -1180,7 +1445,17 @@ proc afterRecvHttp(
 
       if chunkLen == 0: # A chunk of len 0 marks the end of the request body
         let request = server.popRequest(clientSocket, dataEntry)
-        server.postTask(WorkerTask(request: request))
+        if server.executionModel == TaskPools:
+          let isolatableData = toIsolatableRequestData(request)
+          `=destroy`(request[])
+          deallocShared(request)
+          server.postTask(WorkerTask(
+            kind: TaskPoolsTask,
+            isolatableData: isolatableData,
+            clientSocket: clientSocket
+          ))
+        else:
+          server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
   else:
     if dataEntry.requestState.contentLength > server.maxBodyLen:
       server.log(DebugLevel, "Dropped connection, body too long")
@@ -1218,7 +1493,17 @@ proc afterRecvHttp(
         dataEntry.bytesReceived = bytesRemaining
 
     let request = server.popRequest(clientSocket, dataEntry)
-    server.postTask(WorkerTask(request: request))
+    if server.executionModel == TaskPools:
+      let isolatableData = toIsolatableRequestData(request)
+      `=destroy`(request[])
+      deallocShared(request)
+      server.postTask(WorkerTask(
+        kind: TaskPoolsTask,
+        isolatableData: isolatableData,
+        clientSocket: clientSocket
+      ))
+    else:
+      server.postTask(WorkerTask(kind: ThreadPoolTask, request: request))
 
 proc afterRecv(
   server: Server,
@@ -1279,6 +1564,8 @@ proc destroy(server: Server, joinThreads: bool) {.raises: [].} =
     deinitLock(server.responseQueueLock)
     deinitLock(server.sendQueueLock)
     deinitLock(server.websocketQueuesLock)
+    if server.enableUploads:
+      deinitLock(server.uploadManagerLock)
     try:
       server.responseQueued.close()
     except:
@@ -1627,11 +1914,20 @@ proc newServer*(
   workerThreads = max(countProcessors() * 10, 1),
   maxHeadersLen = 8 * 1024, # 8 KB
   maxBodyLen = 1024 * 1024, # 1 MB
-  maxMessageLen = 64 * 1024 # 64 KB
+  maxMessageLen = 64 * 1024, # 64 KB
+  executionModel: ExecutionModel = ThreadPool,
+  taskpoolsHandler: TaskPoolsHandler = nil,
+  taskpoolsHandlerContext: pointer = nil,
+  uploadConfig: UploadConfig = defaultUploadConfig(),
+  enableUploads: bool = false,
+  tusConfig: TUSConfig = defaultTUSConfig()
 ): Server {.raises: [MummyError].} =
   ## Creates a new HTTP server. The request handler will be called for incoming
   ## HTTP requests. The WebSocket handler will be called for WebSocket events.
-  ## Calls to the HTTP, WebSocket and log handlers are made from worker threads.
+  ## 
+  ## With ThreadPool execution model: Calls to handlers are made from fixed worker threads.
+  ## With TaskPools execution model: Calls to handlers are spawned as tasks on a dynamic taskpool.
+  ## 
   ## WebSocket events are dispatched serially per connection. This means your
   ## WebSocket handler must return from a call before the next call will be
   ## dispatched for the same connection.
@@ -1651,8 +1947,62 @@ proc newServer*(
   result.maxBodyLen = maxBodyLen
   result.maxMessageLen = maxMessageLen
   result.rand = initRand()
+  result.executionModel = executionModel
+  
+  # Initialize taskpools handler
+  if taskpoolsHandler != nil:
+    result.taskpoolsHandler = taskpoolsHandler
+  else:
+    # Create a taskpools handler that wraps the traditional handler
+    # For now, use a simplified approach that calls the handler with a mock request
+    result.taskpoolsHandler = proc(data: IsolatableRequestData, ctx: pointer): ResponseData {.gcsafe.} =
+      # Create a temporary Request object from IsolatableRequestData
+      let request = cast[Request](allocShared0(sizeof(RequestObj)))
+      request.httpMethod = data.httpMethod
+      request.path = data.path
+      request.queryParams = data.queryParams
+      request.headers = data.headers
+      request.body = data.body
+      request.remoteAddress = data.remoteAddress
+      request.server = cast[Server](ctx)
+      request.responded = false
+      
+      # Call the original handler
+      try:
+        let server = cast[Server](ctx)
+        server.handler(request)
+        # For now, return a simple success response
+        # TODO: Implement proper response capture mechanism
+        var headers = emptyHttpHeaders()
+        headers["Content-Type"] = "text/plain"
+        result = createResponseData(200, headers, "Handled by TaskPools execution model at " & $now())
+      except:
+        let e = getCurrentException()
+        var headers = emptyHttpHeaders()
+        headers["Content-Type"] = "text/plain"
+        result = createResponseData(500, headers, "Handler Exception: " & e.msg)
+      finally:
+        deallocShared(request)
 
-  result.workerThreads.setLen(workerThreads)
+  # Set taskpools handler context to point to the server
+  if taskpoolsHandlerContext != nil:
+    result.taskpoolsHandlerContext = taskpoolsHandlerContext
+  else:
+    result.taskpoolsHandlerContext = cast[pointer](result)
+
+  # Configure execution model and threading
+  case executionModel:
+  of ThreadPool:
+    result.workerThreads.setLen(workerThreads)
+  of TaskPools:
+    # Use fewer fixed threads for I/O and WebSocket processing
+    result.workerThreads.setLen(max(2, workerThreads div 5))
+    try:
+      result.taskpool = Taskpool.new()
+    except CatchableError as e:
+      raise newException(MummyError, "Failed to create taskpool: " & e.msg)
+  else:
+    result.taskpool = nil
 
   # Stuff that can fail
   try:
@@ -1679,8 +2029,15 @@ proc newServer*(
     initLock(result.responseQueueLock)
     initLock(result.sendQueueLock)
     initLock(result.websocketQueuesLock)
+    
+    # Initialize upload support
+    result.enableUploads = enableUploads
+    result.tusConfig = tusConfig
+    if enableUploads:
+      result.uploadManager = newUploadManager(uploadConfig)
+      initLock(result.uploadManagerLock)
 
-    for i in 0 ..< workerThreads:
+    for i in 0 ..< result.workerThreads.len:
       createThread(result.workerThreads[i], workerProc, result)
   except:
     result.destroy(true)
@@ -1708,3 +2065,123 @@ proc waitUntilReady*(server: Server, timeout: float = 10) =
     if delta > timeout:
       raise newException(MummyError, "Timeout while waiting for server")
     sleep(100)
+
+# Upload helper functions for Request objects
+
+proc createUpload*(
+  request: Request,
+  filename: string,
+  totalSize: int64 = -1,
+  contentType: string = "application/octet-stream"
+): string {.gcsafe.} =
+  ## Create a new upload session for this request
+  if not request.server.enableUploads:
+    raise newException(MummyError, "Uploads not enabled on server")
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.createUpload(filename, request.clientId, totalSize, contentType)
+
+proc getUpload*(request: Request, uploadId: string): ptr UploadSession {.gcsafe.} =
+  ## Get upload session by ID
+  if not request.server.enableUploads:
+    return nil
+  
+  withLock request.server.uploadManagerLock:
+    result = request.server.uploadManager.getUpload(uploadId)
+
+proc handleTUSRequest*(
+  request: Request,
+  uploadId: string = ""
+): TUSResponse {.gcsafe.} =
+  ## Handle TUS protocol request
+  if not request.server.enableUploads:
+    result = createTUSResponse(501, request.server.tusConfig)
+    result.body = "Uploads not enabled"
+    return
+  
+  let tusHeaders = parseTUSHeaders(request.headers)
+  let validation = validateTUSRequest(request.httpMethod, tusHeaders, request.server.tusConfig)
+  
+  if not validation.valid:
+    result = createTUSResponse(400, request.server.tusConfig)
+    result.body = validation.error
+    return
+  
+  withLock request.server.uploadManagerLock:
+    case request.httpMethod.toUpperAscii():
+    of "OPTIONS":
+      result = handleTUSOptions(request.server.tusConfig)
+    of "POST":
+      result = handleTUSCreation(tusHeaders, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "HEAD":
+      result = handleTUSStatus(uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "PATCH":
+      result = handleTUSUpload(tusHeaders, request.body, uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    of "DELETE":
+      result = handleTUSTermination(uploadId, request.server.uploadManager, request.clientId, request.server.tusConfig)
+    else:
+      result = createTUSResponse(405, request.server.tusConfig)
+      result.body = "Method not allowed"
+
+proc respondTUS*(request: Request, tusResponse: TUSResponse) {.gcsafe.} =
+  ## Send TUS response
+  request.respond(tusResponse.statusCode, tusResponse.headers, tusResponse.body)
+
+proc handleRangeRequest*(
+  request: Request,
+  uploadId: string,
+  contentRangeHeader: string
+) {.gcsafe.} =
+  ## Handle HTTP Range request for uploads
+  if not request.server.enableUploads:
+    request.respond(501, emptyHttpHeaders(), "Uploads not enabled")
+    return
+  
+  try:
+    let (rangeStart, rangeEnd, total) = parseUploadRange(contentRangeHeader)
+    
+    withLock request.server.uploadManagerLock:
+      let upload = request.server.uploadManager.getUpload(uploadId)
+      if upload == nil:
+        request.respond(404, emptyHttpHeaders(), "Upload not found")
+        return
+      
+      # Verify client ownership
+      let clientUploads = request.server.uploadManager.sessionsByClient.getOrDefault(request.clientId, @[])
+      if uploadId notin clientUploads:
+        request.respond(403, emptyHttpHeaders(), "Upload not owned by client")
+        return
+      
+      # Ensure upload is ready for writing
+      if upload[].status == UploadPending:
+        upload[].openForWriting()
+      elif upload[].status != UploadInProgress:
+        request.respond(410, emptyHttpHeaders(), "Upload no longer active")
+        return
+      
+      # Write range data
+      if request.body.len > 0:
+        upload[].writeRangeChunk(request.body.toOpenArrayByte(0, request.body.len - 1), rangeStart, rangeEnd)
+      
+      # Check if upload is complete
+      if total > 0 and upload[].bytesReceived >= total:
+        upload[].completeUpload()
+      
+      var headers: HttpHeaders
+      headers["Content-Range"] = fmt"bytes {rangeStart}-{rangeEnd}/{total}"
+      request.respond(204, headers, "")
+      
+  except ranges.RangeError as e:
+    request.respond(400, emptyHttpHeaders(), "Invalid range: " & e.msg)
+  except UploadError as e:
+    request.respond(500, emptyHttpHeaders(), "Upload error: " & e.msg)
+
+proc getUploadStats*(server: Server): tuple[total: int, active: int, completed: int, failed: int] {.gcsafe.} =
+  ## Get upload statistics
+  if not server.enableUploads:
+    return (0, 0, 0, 0)
+  
+  withLock server.uploadManagerLock:
+    result = server.uploadManager.getUploadStats()
+
+# TUS helper functions are exported directly from the tus module

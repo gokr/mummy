@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 ## http://localhost:8080/objects/abc
 

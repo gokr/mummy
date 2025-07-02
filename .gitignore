@@ -11,3 +11,7 @@ nimcache
 .*
 *.out
 *.sqlite3
+
+# Upload test artifacts
+examples/uploads/
+test_upload.txt

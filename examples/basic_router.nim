@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 proc indexHandler(request: Request) =
   var headers: HttpHeaders

@@ -1,4 +1,4 @@
-import mummy
+import ../src/mummy
 
 proc handler(request: Request) =
   case request.uri:

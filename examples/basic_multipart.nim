@@ -1,4 +1,4 @@
-import mummy, mummy/routers, mummy/multipart
+import ../src/mummy, ../src/mummy/routers, ../src/mummy/multipart
 
 ## This example shows how to handle a multipart/form-data POST body.
 

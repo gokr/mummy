@@ -1,4 +1,4 @@
-import mummy, mummy/routers
+import ../src/mummy, ../src/mummy/routers
 
 ## This example shows how to return a custom response for requests
 ## that do not have a matching route (return a 404).

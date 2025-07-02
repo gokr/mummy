@@ -185,3 +185,4 @@ proc strictParseHex*(s: openarray[char]): int =
     integerOutOfRangeError()
 
   result = bits.int
+

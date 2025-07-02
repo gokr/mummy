@@ -1,4 +1,4 @@
-import mummy, mummy/routers, std/locks, std/sets
+import ../src/mummy, ../src/mummy/routers, std/locks, std/sets
 
 ## This example shows a basic chat server over WebSocket.
 ##

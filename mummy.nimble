@@ -9,6 +9,7 @@ requires "nim >= 1.6.8"
 requires "zippy >= 0.10.9"
 requires "webby >= 0.2.1"
 requires "crunchy >= 0.1.11"
+requires "taskpools >= 0.0.3"
 
 # Test task that will install test dependencies and run tests
 task test, "Run tests":
